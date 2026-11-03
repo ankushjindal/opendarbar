@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  com.example.fleet-relay — Mac (laptop) launchd agent for the cross-machine
+  A2A relay. The Mac isn't systemd, so this is the launchd equivalent of
+  server's fleet-relay.timer. Runs fleet-relay.sh every 30s.
+
+  Install (from the Mac, after `git pull` in ~/.claude/plugins/local/kushbot):
+    cp ~/.claude/plugins/local/kushbot/fleet/com.example.fleet-relay.plist \
+       ~/Library/LaunchAgents/
+    launchctl load -w ~/Library/LaunchAgents/com.example.fleet-relay.plist
+    launchctl list | grep fleet-relay        # verify it's registered
+  Reload after edits:  launchctl unload ... && launchctl load -w ...
+  Tail logs:           tail -f ~/.claude/channels/fleet/logs/fleet-relay.*.log
+
+  PREREQ: mac->server ssh must be passwordless (the owner flips the tailnet ssh
+  ACL rule from "check" to "accept"), else the push leg no-ops every tick.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.example.fleet-relay</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>/Users/owner/.claude/plugins/local/kushbot/fleet/fleet-relay.sh</string>
+    </array>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <!-- fleet lives under the login user's home on the Mac -->
+        <key>FLEET_HOME</key>
+        <string>/Users/owner</string>
+        <!-- cover homebrew (arm64 + intel) so jq/rsync/ssh/scp resolve under launchd's bare PATH -->
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    </dict>
+
+    <!-- run every 30s (launchd re-launches the oneshot script on this interval) -->
+    <key>StartInterval</key>
+    <integer>30</integer>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <!-- keep it a periodic oneshot, not a resident daemon -->
+    <key>KeepAlive</key>
+    <false/>
+
+    <key>StandardOutPath</key>
+    <string>/Users/owner/.claude/channels/fleet/logs/fleet-relay.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/owner/.claude/channels/fleet/logs/fleet-relay.err.log</string>
+</dict>
+</plist>

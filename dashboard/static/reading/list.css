@@ -1,0 +1,90 @@
+main { max-width: 720px; }
+.rl-count { display: block; color: var(--text2); font-size: 14px; font-variant-numeric: tabular-nums; margin-top: 40px; }
+.rl-add { margin: 10px 0 0; display: none; }
+.rl-add.on { display: block; }
+.rl-search { margin: 32px 0 0; }
+.rl-add input, .rl-search input {
+  width: 100%; font: inherit; font-size: 16px; color: var(--text); background: none;
+  border: 0; border-bottom: 1px solid var(--border); padding: 8px 0; outline: none;
+  -webkit-appearance: none; appearance: none; border-radius: 0;
+}
+.rl-add input:focus, .rl-search input:focus { border-bottom: 1px solid var(--accent); }
+.rl-add input::placeholder, .rl-search input::placeholder { color: var(--text3); }
+.rl-hint { font-size: 12px; color: var(--text3); padding: 6px 0 0; height: 0; overflow: hidden; }
+.rl-hint.on { height: auto; }
+.rl-msg { font-size: 13px; color: var(--text2); padding: 6px 0 0; }
+.rl-msg:empty { display: none; }
+.rl-chips { display: flex; flex-wrap: wrap; gap: 18px; margin-top: 24px; }
+.rl-chips + .rl-chips { margin-top: 10px; }
+.rl-chip { font: inherit; font-size: 14px; background: none; border: 0; padding: 2px 0; color: var(--text2); cursor: pointer; }
+.rl-chip[aria-pressed="true"] { color: var(--text); text-decoration: underline; text-decoration-thickness: 1px; text-underline-offset: 4px; }
+/* The third row carries length on the left and then the tags the visible rows
+   actually have. The two spans exist for the script, not for the layout:
+   display:contents hands their chips to the one flex row, so length and tags
+   flow and wrap together instead of each taking a line of its own. A wider gap
+   before the first tag is all that separates the two; a rule or a label would
+   be louder than these chips are. */
+.rl-facets .rl-group { display: contents; }
+.rl-facets #rl-tags .rl-chip:first-child { margin-left: 12px; }
+.rl-tag-n { color: var(--text3); margin-left: 5px; font-variant-numeric: tabular-nums; }
+.rl-list { list-style: none; margin: 32px 0 0; padding: 0; display: flex; flex-direction: column; }
+/* .rl-item is display:flex, which outranks the user-agent rule for [hidden] */
+.rl-list li[hidden] { display: none !important; }
+.rl-item { display: flex; align-items: center; gap: 8px; padding: 16px 0; border-bottom: 1px solid var(--border); }
+.rl-item.rl-fresh { box-shadow: inset 2px 0 0 var(--accent); padding-left: 10px; }
+.rl-item.rl-focus { box-shadow: inset 2px 0 0 var(--text2); padding-left: 10px; }
+.rl-byline a { color: var(--text2); text-decoration: underline; text-decoration-thickness: 1px; text-underline-offset: 3px; }
+.rl-byline a[target="_blank"]::after { content: "\2197"; font-size: 0.7em; vertical-align: super; margin-left: 1px; }
+.rl-row { display: flex; gap: 14px; align-items: flex-start; flex: 1; min-width: 0; color: var(--text); text-decoration: none; }
+.rl-text { display: block; flex: 1; min-width: 0; }
+/* a document shows its first page: the one kind of thing in the queue that
+   has a face of its own */
+.rl-thumb {
+  flex: none; width: 44px; height: 58px; object-fit: cover; object-position: top;
+  border: 1px solid var(--border); background: var(--surface); margin-top: 1px;
+}
+.rl-row:hover .rl-title { text-decoration: underline; text-decoration-thickness: 1px; text-underline-offset: 3px; }
+/* Two lines for everything. One line cut a tweet mid-thought, and it turns out
+   a video title does the same: "Sergey Brin: Lessons from G..." is not a title,
+   it is a shrug. */
+.rl-title {
+  font-size: 16px; line-height: 1.35; overflow: hidden;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+}
+.rl-item[data-status="read"] .rl-title, .rl-item[data-status="skipped"] .rl-title { color: var(--text2); }
+/* a book says so before its title; nothing else in the queue needs a mark */
+.rl-glyph { display: inline-block; vertical-align: -2px; margin-right: 6px; color: var(--text2); }
+/* How far into this one he is: a hairline the width of the row, only on the
+   rows that are actually half-read. Two pixels, and no number on it -- the
+   percentage is a word in the meta line, where the rest of the facts are. */
+.rl-prog { display: block; height: 2px; background: var(--border); margin-top: 8px; }
+.rl-prog[hidden] { display: none; }
+.rl-prog span { display: block; height: 2px; background: var(--accent); }
+.rl-meta {
+  display: block; font-size: 12.5px; color: var(--text2); margin-top: 8px;
+  font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+/* one column of actions, the same width on every row, so it reads as a column */
+.rl-actions { flex: none; display: flex; align-items: center; justify-content: flex-end; width: 116px; }
+.rl-star {
+  width: 34px; min-height: 44px; display: flex; align-items: center; justify-content: center;
+  background: none; border: 0; padding: 0; cursor: pointer; color: var(--text3);
+  -webkit-tap-highlight-color: transparent;
+}
+.rl-star svg { fill: none; stroke: currentColor; stroke-width: 1.4; }
+.rl-star:hover { color: var(--text2); }
+.rl-star[aria-pressed="true"] { color: var(--accent); }
+.rl-star[aria-pressed="true"] svg { fill: currentColor; }
+.rl-star:disabled { opacity: 0.4; cursor: default; }
+.rl-quick {
+  min-width: 41px; min-height: 44px; display: flex; align-items: center; justify-content: center;
+  font: inherit; font-size: 13px; background: none; border: 0; padding: 0;
+  color: var(--accent); text-decoration: none; cursor: pointer; -webkit-tap-highlight-color: transparent;
+}
+.rl-quick:hover, .rl-quick:active { text-decoration: underline; text-decoration-thickness: 1px; text-underline-offset: 3px; }
+.rl-quick:disabled { color: var(--text3); cursor: default; text-decoration: none; }
+.rl-empty { color: var(--text2); font-size: 15px; padding: 32px 0; }
+@media (max-width: 640px) {
+  .rl-count { margin-top: 24px; }
+  .rl-search { margin-top: 24px; }
+}

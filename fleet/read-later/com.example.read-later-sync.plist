@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.example.read-later-sync</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/owner/.claude/plugins/local/kushbot/fleet/read-later/sync.sh</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>/Users/owner/.claude/plugins/local/kushbot/fleet/read-later</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <key>HOME</key>
+        <string>/Users/owner</string>
+    </dict>
+    <key>StartInterval</key>
+    <integer>3600</integer>
+    <key>RunAtLoad</key>
+    <false/>
+    <key>LimitLoadToSessionType</key>
+    <string>Aqua</string>
+    <key>StandardOutPath</key>
+    <string>/Users/owner/kush/logs/read-later-sync.launchd.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/owner/kush/logs/read-later-sync.launchd.log</string>
+</dict>
+</plist>

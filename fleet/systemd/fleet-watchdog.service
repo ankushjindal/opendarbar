@@ -1,0 +1,13 @@
+[Unit]
+Description=Fleet watchdog — external health monitor for server agent fleet
+OnFailure=fleet-watchdog-failed.service
+
+[Service]
+Type=oneshot
+ExecStart=/home/owner/kai/fleet-watchdog.sh
+# 420s, not 120s: auto_heal() runs `fleet-ctl start` INLINE, and one start is a
+# 60s prompt-dismissal poll plus a 60s verify-up loop. Two heals in a single pass
+# (a son can flap DEAD -> MUTE, and the cap allows two) is ~240s of legitimate
+# work. At 120s systemd kills the pass mid-heal and OnFailure pages the owner for a
+# watchdog that was doing its job.
+TimeoutStartSec=420

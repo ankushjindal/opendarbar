@@ -1,0 +1,90 @@
+{
+  "$schema": "https://www.raycast.com/schemas/extension.json",
+  "name": "kushconsole",
+  "title": "KushConsole",
+  "version": "0.4.0",
+  "description": "Kush space, keyboard edition. Saved Messages composer (type = save, @name = send, /word = search) + Fleet cockpit for both machines.",
+  "icon": "bender.png",
+  "author": "example-owner",
+  "categories": [
+    "Productivity",
+    "Communication"
+  ],
+  "license": "MIT",
+  "commands": [
+    {
+      "name": "saved",
+      "title": "Saved Messages",
+      "subtitle": "KushConsole",
+      "description": "Bar = composer (↵ saves). @name sends to a person or agent. /query searches. ↵ on a message = edit, ⌃X delete, ⌘C copy.",
+      "mode": "view",
+      "arguments": [
+        {
+          "name": "text",
+          "placeholder": "quick note, or @name message",
+          "type": "text",
+          "required": false
+        }
+      ],
+      "icon": "bender.png"
+    },
+    {
+      "name": "fleet",
+      "title": "Fleet",
+      "subtitle": "KushConsole",
+      "description": "Agents on Mac + server: state, ctx, 5h. ↵ message the bot, ⌘R restart, ⌃X stop, ⌘⇧P park, ⌘⇧N spawn.",
+      "mode": "view",
+      "icon": "bender.png"
+    }
+  ],
+  "preferences": [
+    {
+      "name": "tgsPath",
+      "title": "tgs binary",
+      "type": "textfield",
+      "required": false,
+      "default": "~/bin/tgs",
+      "description": "Path to the tgs CLI (KushDarbar/tgs). Default ~/bin/tgs."
+    },
+    {
+      "name": "pageSize",
+      "title": "Page size",
+      "type": "dropdown",
+      "required": false,
+      "default": "5",
+      "description": "Messages per page",
+      "data": [
+        {
+          "title": "5",
+          "value": "5"
+        },
+        {
+          "title": "10",
+          "value": "10"
+        },
+        {
+          "title": "20",
+          "value": "20"
+        }
+      ]
+    }
+  ],
+  "dependencies": {
+    "@raycast/api": "^1.104.1",
+    "@raycast/utils": "^1.19.0"
+  },
+  "devDependencies": {
+    "@raycast/eslint-config": "^2.0.4",
+    "@types/node": "22.13.10",
+    "@types/react": "19.0.10",
+    "eslint": "^9.22.0",
+    "prettier": "^3.5.3",
+    "typescript": "^5.8.2"
+  },
+  "scripts": {
+    "build": "ray build",
+    "dev": "ray develop",
+    "fix-lint": "ray lint --fix",
+    "lint": "ray lint"
+  }
+}

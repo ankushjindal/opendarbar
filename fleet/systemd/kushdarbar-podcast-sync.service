@@ -1,0 +1,9 @@
+[Unit]
+Description=Darbar Reading podcast feed: pull the Mac reading queue's audio, rewrite the feed
+After=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/owner/kai/KushDarbar/fleet/podcast
+ExecStart=/home/owner/.bun/bin/bun /home/owner/kai/KushDarbar/fleet/podcast/podcast-sync.ts --daily
+TimeoutStartSec=30min

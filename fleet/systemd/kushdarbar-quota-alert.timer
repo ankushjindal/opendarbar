@@ -1,0 +1,11 @@
+[Unit]
+Description=Run quota-alert hourly (and 5 min after boot)
+
+[Timer]
+OnBootSec=5min
+OnCalendar=hourly
+Persistent=true
+AccuracySec=1min
+
+[Install]
+WantedBy=timers.target

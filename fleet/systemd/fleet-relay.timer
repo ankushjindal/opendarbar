@@ -1,0 +1,10 @@
+[Unit]
+Description=Run fleet-relay every 30s (cross-machine A2A transport)
+
+[Timer]
+OnBootSec=90
+OnUnitActiveSec=30
+Persistent=false
+
+[Install]
+WantedBy=timers.target

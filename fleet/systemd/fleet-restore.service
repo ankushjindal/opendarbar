@@ -1,0 +1,13 @@
+[Unit]
+Description=Restore the agent fleet after boot (resume same sessions)
+After=network-online.target
+
+[Service]
+Type=oneshot
+# Give the network + tmux server a beat before spawning claudes.
+ExecStartPre=/bin/sleep 30
+ExecStart=/home/owner/kai/fleet-ctl boot-restore
+TimeoutStartSec=900
+
+[Install]
+WantedBy=default.target

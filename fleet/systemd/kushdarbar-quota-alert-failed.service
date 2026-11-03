@@ -1,0 +1,7 @@
+[Unit]
+Description=Alert the owner when quota-alert itself fails
+
+[Service]
+Type=oneshot
+# Replace OWNER_CHAT_ID below with your Telegram user id before installing.
+ExecStart=/bin/bash -c 'tok=$(grep -oP "^TELEGRAM_BOT_TOKEN=\\K.*" /home/owner/.claude/channels/telegram/.env); curl -sS -m 10 "https://api.telegram.org/bot$tok/sendMessage" -d chat_id=OWNER_CHAT_ID --data-urlencode text="quota-alert.service FAILED. journalctl --user -u kushdarbar-quota-alert -n 30" >/dev/null'

@@ -1,0 +1,9 @@
+[Unit]
+Description=Usage sampler - hourly 3-meter checkpoint for every Claude seat (/usage dashboard)
+
+[Service]
+Type=oneshot
+Environment=PATH=/home/owner/.local/bin:/home/owner/.bun/bin:/usr/local/bin:/usr/bin:/bin
+WorkingDirectory=/home/owner/kai/KushDarbar/dashboard
+ExecStart=/home/owner/.bun/bin/bun /home/owner/kai/KushDarbar/fleet/usage-sample.ts
+TimeoutStartSec=120

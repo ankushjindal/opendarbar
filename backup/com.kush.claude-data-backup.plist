@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.kush.claude-data-backup</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>/Users/owner/kush/bin/claude-data-backup.sh</string>
+    </array>
+    <!-- Weekly nominal run: Sunday 04:00. If asleep then, launchd runs it on next wake. -->
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Weekday</key>
+        <integer>0</integer>
+        <key>Hour</key>
+        <integer>4</integer>
+        <key>Minute</key>
+        <integer>0</integer>
+    </dict>
+    <!-- Catch-up safety net: also run at every login/boot. Covers the case where the
+         Mac was fully OFF at the scheduled time (launchd doesn't replay calendar
+         events missed while powered down). Script is idempotent — only commits on change. -->
+    <key>RunAtLoad</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>/Users/owner/kush/logs/claude-data-backup.out</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/owner/kush/logs/claude-data-backup.err</string>
+</dict>
+</plist>

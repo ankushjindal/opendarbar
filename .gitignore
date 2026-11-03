@@ -1,0 +1,27 @@
+# deps
+node_modules/
+
+# runtime state / secrets (these normally live under ~/.claude/channels/, but
+# ignore defensively in case the bot is ever run from this dir)
+*.env
+.env
+.env.*
+*.pid
+*.sock
+*.log
+inbox/
+approved/
+pending/
+access.json
+claimed_by.pid
+_status/
+_requests/
+
+# os / editor
+.DS_Store
+*.swp
+
+# served report HTML (generated, per-machine)
+dashboard/static/reports/
+__pycache__/
+.claude/worktrees/

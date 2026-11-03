@@ -1,0 +1,624 @@
+main { max-width: 720px; padding-bottom: 104px; }
+.rl-h1 { font-size: 32px; line-height: 1.15; font-weight: 600; margin: 96px 0 12px; }
+.rl-byline { font-size: 15px; color: var(--text2); font-variant-numeric: tabular-nums; margin: 0; overflow-wrap: anywhere; }
+.rl-controls { margin-top: 16px; }
+.rl-controls > * { display: flex; flex-wrap: wrap; align-items: center; }
+.rl-controls > * + * { margin-top: 10px; }
+.rl-body { max-width: 65ch; margin-top: 64px; }
+.rl-body .md { font-size: 18px; line-height: 1.6; }
+.rl-body .md p, .rl-body .md li { overflow-wrap: anywhere; }
+.rl-body .md p { margin: 0 0 1.25em; }
+.rl-body .md img, .rl-body .md video, .rl-body .md iframe { max-width: 100%; height: auto; }
+.rl-body .md pre, .rl-body .md table { max-width: 100%; overflow-x: auto; display: block; }
+.rl-cue-x, .rl-hl, .rl-note { overflow-wrap: anywhere; }
+.rl-body .md h1 { display: none; }
+.rl-body .md h2 { font-size: 22px; font-weight: 600; border: 0; padding: 0; margin: 2.5em 0 0.75em; }
+.rl-body .md h3 { font-size: 19px; font-weight: 600; border: 0; padding: 0; margin: 2em 0 0.6em; }
+.rl-body .md hr { display: none; }
+.rl-body .md ul, .rl-body .md ol { margin: 0 0 1.25em; padding-left: 1.6em; }
+.rl-body .md li { margin: 0.35em 0; }
+.rl-body .md li::marker { color: var(--text3); }
+/* stephango's links: the text colour, a hairline under it, an arrow if it leaves */
+.rl-missing { font-size: 16px; color: var(--text2); margin: 24px 0 0; }
+.rl-missing a { color: var(--text2); text-decoration: underline; text-decoration-thickness: 1px; text-underline-offset: 3px; }
+.rl-body .md a, .rl-quote a {
+  color: var(--text); text-decoration: underline;
+  text-decoration-thickness: 1px; text-underline-offset: 3px; overflow-wrap: anywhere;
+}
+.rl-body .md a[target="_blank"]::after {
+  content: "\2197"; font-size: 0.7em; vertical-align: super; color: var(--text2);
+  margin-left: 1px; text-decoration: none; display: inline-block;
+}
+.rl-body .md code { background: var(--surface); border: 0; color: var(--text); font-size: 0.88em; padding: 1px 5px; }
+.rl-body .md pre { background: var(--surface); border: 0; }
+.rl-body .md img { border-radius: 0; max-width: 100%; height: auto; }
+.rl-body .md blockquote { border-left: 2px solid var(--border); color: var(--text); font-size: 18px; padding: 0 0 0 16px; margin: 0 0 1.25em; }
+/* a tweet's own words are the body of the page, not something it is quoting */
+.rl-tweet .md > blockquote { border-left: 0; padding-left: 0; }
+/* a thread reads as one piece; the number is how you keep your place in it */
+.rl-tn {
+  font-size: 12px; color: var(--text3); letter-spacing: 0.04em;
+  margin: 2em 0 0.6em; font-variant-numeric: tabular-nums;
+}
+/* the note repeats its title as a hidden h1, so the first marker is the one
+   right after it */
+.rl-tn:first-child, .rl-body .md h1 + .rl-tn { margin-top: 0; }
+.rl-quote { border-left: 2px solid var(--border); padding-left: 16px; margin: 2em 0; }
+.rl-quote p { font-size: 17px; margin: 0 0 0.7em; }
+.rl-quote p:first-child strong { font-size: 13px; font-weight: 600; color: var(--text2); }
+.rl-quote blockquote { border-left: 0; padding: 0; margin: 0 0 0.7em; font-size: 17px; color: var(--text2); }
+.rl-body .md p > a[href*="/status/"]:only-child { color: var(--text2); }
+
+/* Rating: kepano's seven bands. A native select, so the phone gives its wheel
+   and the Daylight its list; the visible text is ours so the closed state can
+   read "5 Good" while the wheel still carries the whole meaning. */
+.rl-rate { position: relative; display: inline-flex; align-items: center; min-height: 44px; }
+.rl-rate-text {
+  font-size: 14px; color: var(--text3); border-bottom: 1px solid var(--border);
+  padding: 2px 16px 2px 0; white-space: nowrap;
+}
+.rl-rate[data-set="1"] .rl-rate-text { color: var(--text); }
+.rl-rate-chev {
+  position: absolute; right: 2px; top: 50%; margin-top: -2px; width: 7px; height: 7px;
+  border-right: 1px solid var(--text3); border-bottom: 1px solid var(--text3);
+  transform: rotate(45deg); pointer-events: none;
+}
+.rl-rate select {
+  position: absolute; inset: 0; width: 100%; height: 100%; opacity: 0;
+  font: inherit; -webkit-appearance: none; appearance: none; border: 0; background: none; cursor: pointer;
+}
+
+/* Tags: muted words, quiet on every kind. */
+.rl-tags { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+.rl-tag {
+  font: inherit; font-size: 13px; background: none; border: 0; padding: 4px 0;
+  color: var(--text2); cursor: pointer;
+}
+.rl-tag:hover { color: var(--danger); text-decoration: line-through; }
+.rl-tag-add { font: inherit; font-size: 13px; background: none; border: 0; padding: 4px 0; color: var(--text3); cursor: pointer; }
+.rl-tag-add:hover { color: var(--text2); }
+.rl-tag-input {
+  font: inherit; font-size: 14px; width: 130px; background: none; color: var(--text);
+  border: 0; border-bottom: 1px solid var(--border); outline: none; padding: 2px 0; display: none;
+}
+.rl-tag-input.on { display: inline-block; }
+.rl-tag-input:focus { border-bottom-color: var(--accent); }
+
+/* Read or PDF: the text as an article, or the file with the text under it.
+   Chips like the list's, so the switch reads as a filter rather than a tool. */
+.rl-mode { display: flex; gap: 18px; }
+.rl-mode .rl-chip { font: inherit; font-size: 14px; background: none; border: 0; padding: 2px 0; color: var(--text2); cursor: pointer; }
+.rl-mode .rl-chip[aria-pressed="true"] { color: var(--text); text-decoration: underline; text-decoration-thickness: 1px; text-underline-offset: 4px; }
+main[data-doc-mode="read"] .rl-doc, main[data-doc-mode="read"] .rl-doc-label { display: none; }
+@media (max-width: 640px) {
+  .rl-mode { display: none; }
+  main[data-doc-mode="read"] .rl-doc, main[data-doc-mode="read"] .rl-doc-label { display: block; }
+}
+/* Document preview: the file itself on a screen wide enough to page through
+   it; on a phone, where an iframe shows one page and stops, the cover and a
+   link into the system viewer instead. The text layer follows below either way. */
+.rl-doc { margin-top: 40px; }
+.rl-doc-frame { display: block; width: 100%; height: 78vh; border: 1px solid var(--border); background: var(--surface); }
+.rl-doc-row { display: flex; align-items: center; gap: 20px; margin-top: 12px; }
+.rl-doc-open {
+  display: flex; align-items: center; gap: 16px; font-size: 14px;
+  color: var(--text2); text-decoration: none;
+}
+.rl-doc-full {
+  font: inherit; font-size: 14px; color: var(--text2); background: none; border: 0; padding: 0; cursor: pointer;
+  text-decoration: underline; text-decoration-thickness: 1px; text-underline-offset: 3px;
+}
+.rl-doc-full:hover { color: var(--text); }
+.rl-doc-exit { display: none; }
+/* Fullscreen: the Fullscreen API on the frame where the browser allows it;
+   otherwise the frame pinned over the page, with Esc or Exit to come back. */
+.rl-doc-frame:fullscreen { border: 0; background: #000; }
+.rl-doc.rl-doc-pinned .rl-doc-frame { position: fixed; inset: 0; width: 100vw; height: 100vh; z-index: 50; border: 0; }
+.rl-doc.rl-doc-pinned .rl-doc-exit {
+  display: block; position: fixed; top: 10px; right: 12px; z-index: 51; font: inherit; font-size: 13px;
+  color: #CECDC3; background: #1C1B1A; border: 1px solid #575653; border-radius: 4px; padding: 4px 10px; cursor: pointer;
+}
+.rl-doc-open span { text-decoration: underline; text-decoration-thickness: 1px; text-underline-offset: 3px; }
+.rl-doc-open span::after { content: "\2197"; font-size: 0.7em; vertical-align: super; margin-left: 1px; text-decoration: none; display: inline-block; }
+.rl-doc-open:hover { color: var(--text); }
+.rl-doc-cover { display: none; }
+@media (max-width: 640px) {
+  .rl-doc-frame { display: none; }
+  .rl-doc-full { display: none; }
+  .rl-doc-row { margin-top: 0; }
+  .rl-doc-cover { display: block; width: 96px; height: auto; border: 1px solid var(--border); background: var(--surface); }
+}
+.rl-body .md .rl-pg {
+  display: block; font-size: 12px; letter-spacing: 0.08em; text-transform: uppercase;
+  color: var(--text3); margin-top: 1.5em; font-variant-numeric: tabular-nums;
+}
+/* Player and transcript
+   The player is a sticky band, and it is one size all the way down. It used to
+   go `position: fixed` and shrink as it pinned, which looked better and was
+   wrong: iOS paints a YouTube frame BLACK inside a fixed or transformed box —
+   the captions kept coming, the picture did not, and taps missed the controls.
+   Nothing here transforms or fixes the box the frame sits in. One size also
+   means the height never leaves the flow, so the transcript below never jumps,
+   which was the reason for the fixed box in the first place. */
+:root {
+  --rl-col: min(calc(100vw - 40px), 680px);
+  /* A picture no taller than a third of the screen; the column is the ceiling,
+     and on a phone the column gets there first, so it stays full width. */
+  --rl-vid-w: min(var(--rl-col), calc(34vh * 16 / 9));
+  --rl-pin-box: calc(var(--rl-vid-w) * 9 / 16);
+}
+.rl-player {
+  position: sticky; top: 0; z-index: 5;
+  width: 100%; height: calc(var(--rl-pin-box) + 14px);
+  margin: 40px 0 0; background: var(--bg);
+}
+.rl-player-in {
+  position: relative; width: var(--rl-vid-w); height: var(--rl-pin-box); background: #000;
+}
+.rl-player-in iframe { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; }
+/* The way out while it is pinned: the picture goes, the sound stays, and the
+   same word brings it back. visibility, not a transform, for the reason above. */
+.rl-pin-hide { display: none; }
+.rl-player.rl-pin .rl-pin-hide {
+  display: block; position: absolute; top: 4px; right: 0; z-index: 6;
+  font: inherit; font-size: 13px; color: var(--text2); background: var(--bg);
+  border: 0; padding: 6px 0; min-height: 36px; cursor: pointer;
+}
+.rl-player.rl-pin .rl-pin-hide:hover { color: var(--text); text-decoration: underline; text-decoration-thickness: 1px; text-underline-offset: 3px; }
+.rl-player.rl-pin-off { height: 40px; }
+.rl-player.rl-pin-off .rl-player-in { visibility: hidden; }
+.rl-cues-h, .rl-marg-h {
+  font-size: 12px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase;
+  color: var(--text2); margin: 72px 0 16px;
+}
+.rl-cues { list-style: none; margin: 0; padding: 0; }
+.rl-cue {
+  display: grid; grid-template-columns: 54px 1fr; gap: 14px; padding: 10px 0; cursor: pointer;
+  /* clear of the pinned player, which is what will be covering the top of the
+     screen by the time a cue is ever scrolled to */
+  scroll-margin-top: calc(var(--rl-pin-box) + 24px);
+}
+.rl-cue-t {
+  font: inherit; font-size: 13px; line-height: 1.4; color: var(--text2);
+  font-variant-numeric: tabular-nums; background: none; border: 0; padding: 0;
+  text-align: left; cursor: pointer; align-self: start;
+}
+/* reserved so the marker appearing cannot shift the line it sits above */
+.rl-cue-t::before { content: ""; display: block; width: 26px; height: 2px; background: transparent; margin-bottom: 7px; }
+.rl-cue-x { font-size: 17px; line-height: 1.6; margin: 0; }
+.rl-cue.on .rl-cue-t { color: var(--accent); }
+.rl-cue.on .rl-cue-t::before { background: var(--accent); }
+.rl-cue.on .rl-cue-x { color: var(--text); }
+.rl-cue:not(.on) .rl-cue-x { color: var(--text2); }
+
+/* Highlights and notes */
+.rl-marg { max-width: 65ch; }
+.rl-marg-h.rl-off { display: none; }
+.rl-hl { border-left: 2px solid var(--border); margin: 0; padding: 0 0 0 16px; font-size: 17px; line-height: 1.55; }
+.rl-note-list { list-style: none; margin: 0 0 20px; padding: 0; }
+.rl-note { font-size: 16px; line-height: 1.55; padding: 8px 0; }
+.rl-note-when { color: var(--text3); font-variant-numeric: tabular-nums; font-size: 13px; }
+.rl-note-form textarea {
+  width: 100%; font: inherit; font-size: 16px; line-height: 1.5; color: var(--text);
+  background: none; border: 0; border-bottom: 1px solid var(--border); border-radius: 0;
+  padding: 6px 0; outline: none; resize: vertical; min-height: 4.5em;
+}
+.rl-note-form textarea:focus { border-bottom-color: var(--accent); }
+.rl-note-form textarea::placeholder { color: var(--text3); }
+.rl-note-btn {
+  font: inherit; font-size: 15px; background: none; border: 0; padding: 10px 0; cursor: pointer;
+  color: var(--text); text-decoration: underline; text-decoration-thickness: 1px; text-underline-offset: 3px;
+}
+.rl-note-btn:disabled { color: var(--text3); cursor: default; text-decoration: none; }
+
+/* Bottom bar */
+.rl-bar {
+  position: fixed; left: 0; right: 0; bottom: 0; z-index: 5;
+  background: var(--bg); border-top: 1px solid var(--border);
+  padding: 8px 20px calc(8px + env(safe-area-inset-bottom));
+}
+.rl-bar-inner { max-width: 720px; margin: 0 auto; }
+.rl-bar-main { display: flex; flex-wrap: wrap; align-items: center; gap: 2px; }
+.rl-err { font-size: 13px; color: var(--danger); padding: 0 0 8px; line-height: 1.4; overflow-wrap: anywhere; }
+.rl-err:empty { display: none; }
+.rl-act {
+  display: inline-flex; align-items: center; font: inherit; font-size: 15px;
+  background: none; border: 0; cursor: pointer; color: var(--text);
+  padding: 0 14px 0 0; min-height: 44px; text-decoration: none;
+}
+.rl-act:hover { text-decoration: underline; text-decoration-thickness: 1px; text-underline-offset: 3px; }
+.rl-act[aria-pressed="true"] { text-decoration: underline; text-underline-offset: 4px; }
+.rl-act:disabled { color: var(--text3); }
+/* What is left of the minor row: the one quiet word that is not a control,
+   saying how many writes are still waiting to reach the Mac. */
+.rl-minor {
+  display: inline-flex; align-items: center; font: inherit; font-size: 13px; color: var(--text2);
+  background: none; border: 0; padding: 0; min-height: 44px; text-decoration: none;
+}
+.rl-bar-right { margin-left: auto; display: flex; align-items: center; gap: 14px; flex: none; }
+.rl-confirm { display: none; align-items: center; gap: 4px; font-size: 14px; color: var(--text2); flex-wrap: wrap; }
+.rl-bar[data-confirm="del"] .rl-confirm-del,
+.rl-bar[data-confirm="rep"] .rl-confirm-rep { display: flex; }
+.rl-bar[data-confirm="del"] .rl-bar-main,
+.rl-bar[data-confirm="rep"] .rl-bar-main { display: none; }
+/* Asking for an address in the bar, the way Delete asks for a yes. */
+.rl-rep-url {
+  font: inherit; font-size: 15px; flex: 1 1 140px; min-width: 0; background: none; color: var(--text);
+  border: 0; border-bottom: 1px solid var(--border); outline: none; padding: 6px 2px; margin-right: 8px;
+}
+.rl-rep-url:focus { border-bottom-color: var(--accent); }
+.rl-rep-url::placeholder { color: var(--text3); }
+/* How far in he is, across the very top of the page: two pixels of accent and
+   nothing else. It is the one thing on a reading surface that is allowed to
+   move while he reads, so it says the number without ever printing it. */
+.rl-prog-top { position: fixed; top: 0; left: 0; right: 0; height: 2px; z-index: 8; pointer-events: none; }
+.rl-prog-top span { display: block; height: 2px; width: 0; background: var(--accent); }
+/* Said once, when the note knew a further point than this device did. It has to
+   be fixed: the jump it is explaining has already taken the top of the page off
+   the screen. Same materials as the bottom bar, so it reads as the reader's own
+   chrome rather than as a dialog, and it goes away on its own. */
+.rl-resume {
+  position: fixed; top: 2px; left: 0; right: 0; z-index: 7; margin: 0;
+  background: var(--bg); border-bottom: 1px solid var(--border);
+  padding: 8px 20px; font-size: 13px; color: var(--text2); text-align: center;
+  pointer-events: none;
+}
+.rl-resume[hidden] { display: none; }
+/* Both of these are fixed to the top of the screen, and the video got there
+   first: the line that explains the jump belongs under the picture, not across
+   it. Where :has() is not understood it stays where it was, for six seconds. */
+body:has(.rl-player.rl-pin) .rl-resume { top: calc(var(--rl-pin-box, 0px) + 2px); }
+/* The header that follows him down the page.
+   Three rules, and they are all about not being in the way. It is absent at
+   the top, where the real h1 is saying the same thing louder. Below that it
+   behaves like a phone reader: gone while he scrolls forward, back the moment
+   he scrolls up, so it never covers a line he is moving through. And it is one
+   line of chrome — 14px, --text2, a hairline under it — not a second heading.
+
+   The top of the screen already has three tenants, so the order is settled
+   here once:
+
+     8  .rl-prog-top   two pixels of accent, top: 0, never covered
+     7  .rl-resume     the six-second "Resume at N%" strip, top: 2
+     6  .rl-sticky     this, top: 0
+     5  .rl-player     the pinned video
+
+   This one goes flush to the top and lets the progress hairline paint over
+   its first two pixels, which reads as the header's own top edge; leaving the
+   two pixels clear instead showed a sliver of moving body text above it at
+   1280. The two that would then share the same y are handled below rather
+   than stacked: the resume strip pushes this off the screen for its six
+   seconds (one voice at the top at a time), and a pinned video replaces it
+   outright. */
+.rl-sticky {
+  position: fixed; top: 0; left: 0; right: 0; z-index: 6;
+  background: var(--bg); border-bottom: 1px solid var(--border);
+  /* Off the screen rather than display:none, so the reveal is a movement and
+     not a flash, and invisible with it so nothing off-screen is tabbable or
+     read out. The visibility waits for the slide out and leads the slide in. */
+  transform: translateY(-100%);
+  visibility: hidden;
+  transition: transform 160ms ease, visibility 0s linear 160ms;
+}
+.rl-sticky[data-show="1"] {
+  transform: none; visibility: visible;
+  transition: transform 160ms ease, visibility 0s;
+}
+@media (prefers-reduced-motion: reduce) {
+  .rl-sticky, .rl-sticky[data-show="1"] { transition: none; }
+}
+/* The same column the page is set in, so the title starts where the h1 does. */
+.rl-sticky-row {
+  display: flex; align-items: center; gap: 12px; min-height: 44px;
+  max-width: 720px; margin: 0 auto; padding: 0 20px;
+}
+/* One line, truncated, and the whole of it is the way back up. Selection is
+   off on it because it is a button that happens to be made of the title. */
+.rl-sticky-back {
+  flex: 1; min-width: 0; align-self: stretch; text-align: left;
+  font: inherit; font-size: 14px; color: var(--text2);
+  background: none; border: 0; padding: 0; margin: 0; cursor: pointer;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  -webkit-user-select: none; user-select: none;
+}
+.rl-sticky-back:hover { color: var(--text); }
+.rl-sticky-acts { flex: none; display: flex; align-items: center; gap: 18px; }
+.rl-sticky-act {
+  font: inherit; font-size: 13px; min-height: 44px; padding: 0 2px;
+  background: none; border: 0; color: var(--text2); cursor: pointer;
+}
+.rl-sticky-act:hover { color: var(--text); text-decoration: underline; text-decoration-thickness: 1px; text-underline-offset: 3px; }
+/* Something is speaking. The word is already Pause; this is only the tint. */
+.rl-sticky-act[data-on="1"] { color: var(--accent); }
+/* Tagging from where he is. The input is here rather than a scroll down to
+   the controls block, because scrolling to it would take him back to the top —
+   the exact thing this header exists to save him — and the header, which is
+   absent at the top, would vanish under his thumb on the way. Same chips and
+   the same endpoint as the controls block; this is a second view of one row. */
+.rl-sticky-tagrow { display: none; }
+.rl-sticky[data-tag="1"] .rl-sticky-tagrow {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 10px;
+  max-width: 720px; margin: 0 auto; padding: 0 20px 10px;
+}
+.rl-sticky-tagrow .rl-tag-input { width: 120px; }
+/* A video held at the top is already a picture of what he is watching, and
+   while it is pinned it carries its own Hide. A title line above it would say
+   the same thing a second time, and it would have to push the picture down and
+   up as it revealed and hid — exactly the jump the player's one fixed height
+   exists to prevent. So on a video the picture wins, and the header comes back
+   the moment the player scrolls off the top.
+
+   rl-pin-top rather than rl-pin: the player is `position: sticky` in this
+   sheet whatever the "Hold the video" setting says, so with that setting off
+   the picture is still up there and this still has to give way. rl-pin is the
+   shrink-and-Hide behaviour; rl-pin-top is the plain fact of being at the top.
+   Where :has() is not understood the header simply stays, which is the worse
+   of two workable answers rather than a broken page. */
+body:has(.rl-player.rl-pin-top) .rl-sticky { display: none; }
+/* The resume strip is fixed to the same two pixels and says its one sentence
+   for six seconds. It goes first; the header waits. */
+body[data-resume="1"] .rl-sticky {
+  transform: translateY(-100%); visibility: hidden;
+}
+
+/* The quiet line under the byline that offers arXiv's PDF. */
+.rl-swap { font-size: 14px; color: var(--text2); margin: 6px 0 0; }
+.rl-swap a { color: var(--text2); text-decoration: underline; text-decoration-thickness: 1px; text-underline-offset: 3px; cursor: pointer; }
+.rl-swap a:hover { color: var(--text); }
+/* A long press on a link is ours now: the pill says more than the callout did. */
+.rl-body a { -webkit-touch-callout: none; }
+mark.rl-mark { background: var(--mark); color: inherit; padding: 0 1px; }
+/* One pill, wherever the highlight is: over a fresh selection, or over an
+   existing mark you tapped. Managing a highlight where it lives beats
+   scrolling to the bottom to find it. */
+.rl-pill {
+  display: none; position: fixed; z-index: 12; align-items: center; gap: 2px;
+  background: var(--bg); border: 1px solid var(--border); border-radius: 3px;
+  padding: 2px 4px; max-width: calc(100vw - 24px);
+}
+.rl-pill.on { display: flex; }
+.rl-pill button {
+  font: inherit; font-size: 14px; background: none; border: 0; padding: 8px 10px;
+  color: var(--text); cursor: pointer; white-space: nowrap; min-height: 40px;
+}
+.rl-pill button:hover { text-decoration: underline; text-decoration-thickness: 1px; text-underline-offset: 3px; }
+.rl-pill button.rl-pill-muted { color: var(--text2); font-size: 13px; }
+.rl-pill input {
+  font: inherit; font-size: 15px; width: 190px; background: none; color: var(--text);
+  border: 0; border-bottom: 1px solid var(--border); outline: none; padding: 6px 2px; margin: 0 4px;
+}
+.rl-pill input:focus { border-bottom-color: var(--accent); }
+.rl-pill .rl-pill-note { display: none; }
+.rl-pill[data-mode="note"] .rl-pill-note { display: flex; align-items: center; }
+.rl-pill[data-mode="note"] .rl-pill-main { display: none; }
+mark.rl-mark { cursor: pointer; }
+.rl-hl-item { margin: 0 0 22px; }
+.rl-hl-notes { list-style: none; margin: 6px 0 0; padding: 0 0 0 18px; }
+.rl-hl-note { font-size: 14px; line-height: 1.5; color: var(--text2); padding: 3px 0; }
+.rl-hl-acts { display: flex; gap: 10px; padding-left: 18px; }
+.rl-hl-act {
+  font: inherit; font-size: 13px; background: none; border: 0; padding: 8px 0;
+  color: var(--text3); cursor: pointer; min-height: 40px;
+}
+.rl-hl-act:hover { color: var(--text2); text-decoration: underline; text-decoration-thickness: 1px; text-underline-offset: 3px; }
+
+/* The bar is one row now: Done, Star, Open, and the three dots on the right.
+   The five minor words that used to take a second row moved into the sheet, so
+   nothing here wraps at 390px and there is no phone case to special-case. */
+
+/* Three dots in the bar, and the sheet they open: this item's rarer actions,
+   then a rule, then the two site-wide switches. Same materials as the shortcuts
+   overlay, because they are the same kind of thing covering the same page. */
+.rl-act-dots { letter-spacing: 0.12em; font-size: 17px; padding-bottom: 4px; }
+.rl-settings {
+  display: none; position: fixed; inset: 0; z-index: 20; background: rgba(0,0,0,0.35);
+  align-items: center; justify-content: center; padding: 20px;
+}
+.rl-settings.on { display: flex; }
+.rl-settings-sheet {
+  background: var(--bg); border: 1px solid var(--border); max-width: 420px; width: 100%;
+  max-height: 80vh; overflow: auto; padding: 24px;
+}
+.rl-settings h3 {
+  font-size: 12px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase;
+  color: var(--text2); margin: 0 0 14px;
+}
+/* This item's rarer actions: one under the next, each a 44px line, quiet text
+   with a hairline on hover, the same as the words they used to be in the bar.
+   The rule under them is the seam between "this note" and "every note". */
+.rl-sheet-acts { display: flex; flex-direction: column; align-items: flex-start; }
+.rl-sheet-act {
+  display: flex; align-items: center; width: 100%; min-height: 44px;
+  font: inherit; font-size: 15px; text-align: left; color: var(--text);
+  background: none; border: 0; padding: 0; cursor: pointer; text-decoration: none;
+}
+.rl-sheet-act:hover { text-decoration: underline; text-decoration-thickness: 1px; text-underline-offset: 3px; }
+.rl-sheet-act[hidden] { display: none; }
+.rl-sheet-rule { border: 0; border-top: 1px solid var(--border); margin: 14px 0 18px; }
+
+.rl-setting { display: flex; align-items: flex-start; gap: 12px; cursor: pointer; padding: 6px 0 14px; }
+.rl-setting input { margin: 2px 0 0; width: 18px; height: 18px; accent-color: var(--accent); flex: none; }
+.rl-setting-body { display: block; }
+.rl-setting-name { display: block; font-size: 15px; color: var(--text); }
+.rl-setting-why { display: block; font-size: 13px; color: var(--text2); margin-top: 3px; line-height: 1.45; }
+.rl-settings-done {
+  font: inherit; font-size: 15px; background: none; border: 0; padding: 12px 0 0; cursor: pointer;
+  color: var(--text); text-decoration: underline; text-decoration-thickness: 1px; text-underline-offset: 3px;
+  min-height: 44px;
+}
+
+/* Listen: closed it is one more quiet word under the tags; open it is a voice,
+   an action and what that action costs. No boxes, same hairlines as the rest. */
+.rl-listen { display: block; }
+.rl-listen-open {
+  font: inherit; font-size: 14px; background: none; border: 0; padding: 4px 0; cursor: pointer;
+  color: var(--text2);
+}
+.rl-listen-open:hover { color: var(--text); text-decoration: underline; text-decoration-thickness: 1px; text-underline-offset: 3px; }
+.rl-listen[data-open="1"] .rl-listen-open { color: var(--text); text-decoration: underline; text-decoration-thickness: 1px; text-underline-offset: 3px; }
+.rl-listen-panel { display: none; margin: 6px 0 0; }
+.rl-listen[data-open="1"] .rl-listen-panel { display: block; }
+.rl-saved-row { display: flex; flex-wrap: wrap; align-items: center; gap: 14px; padding: 4px 0; font-size: 14px; }
+.rl-saved-name { color: var(--text2); }
+.rl-saved-act {
+  font: inherit; font-size: 14px; background: none; border: 0; padding: 4px 0; cursor: pointer;
+  color: var(--text); text-decoration: underline; text-decoration-thickness: 1px; text-underline-offset: 3px;
+}
+.rl-saved-row[data-playing="1"] .rl-saved-name { color: var(--text); }
+.rl-listen-more { font: inherit; font-size: 13px; background: none; border: 0; padding: 6px 0; color: var(--text3); cursor: pointer; }
+.rl-listen-more:hover { color: var(--text2); text-decoration: underline; text-decoration-thickness: 1px; text-underline-offset: 3px; }
+.rl-make { display: flex; flex-wrap: wrap; align-items: center; gap: 16px; }
+.rl-make[hidden] { display: none; }
+/* The voice wheel is the rating select again: our own text so the closed state
+   reads as a name, the native control underneath so the phone gives its wheel. */
+.rl-voice { position: relative; display: inline-flex; align-items: center; min-height: 44px; }
+.rl-voice-text {
+  font-size: 14px; color: var(--text); border-bottom: 1px solid var(--border);
+  padding: 2px 16px 2px 0; white-space: nowrap;
+}
+.rl-voice select {
+  position: absolute; inset: 0; width: 100%; height: 100%; opacity: 0;
+  font: inherit; -webkit-appearance: none; appearance: none; border: 0; background: none; cursor: pointer;
+}
+.rl-listen-go {
+  font: inherit; font-size: 14px; background: none; border: 0; padding: 4px 0; cursor: pointer;
+  color: var(--text); text-decoration: underline; text-decoration-thickness: 1px; text-underline-offset: 3px;
+}
+.rl-listen-go:disabled { color: var(--text3); text-decoration: none; cursor: default; }
+.rl-listen-est { font-size: 13px; color: var(--text2); font-variant-numeric: tabular-nums; }
+.rl-listen-confirm { display: none; flex-wrap: wrap; align-items: center; gap: 14px; font-size: 14px; color: var(--text2); margin-top: 8px; }
+.rl-listen[data-confirm="1"] .rl-listen-confirm { display: flex; }
+.rl-listen[data-confirm="1"] .rl-make { display: none; }
+.rl-listen-act {
+  font: inherit; font-size: 14px; background: none; border: 0; padding: 4px 0; cursor: pointer;
+  color: var(--text); text-decoration: underline; text-decoration-thickness: 1px; text-underline-offset: 3px;
+}
+.rl-listen-act.rl-listen-cancel { color: var(--text3); }
+.rl-listen-msg { font-size: 13px; color: var(--text2); margin: 6px 0 0; overflow-wrap: anywhere; }
+.rl-listen-msg:empty { display: none; }
+
+/* The player sits on top of the bottom bar, never over it: --rl-bar-h is
+   measured from the bar itself, because an error line or the Delete confirm
+   changes how tall it is. */
+.rl-audio {
+  position: fixed; left: 0; right: 0; bottom: var(--rl-bar-h, 60px); z-index: 6;
+  background: var(--bg); border-top: 1px solid var(--border); padding: 8px 20px;
+}
+.rl-audio-in { max-width: 720px; margin: 0 auto; }
+/* The element is the engine and the lock-screen handle; nothing about it is
+   shown, because everything it would show is drawn above. */
+.rl-audio audio { display: none; }
+
+/* The scrubber, with the two numbers that actually get read: how far in, and
+   how much is left. Tabular so they do not jitter every second. */
+.rl-scrub { display: flex; align-items: center; gap: 10px; }
+.rl-time {
+  font-size: 12px; color: var(--text3); font-variant-numeric: tabular-nums;
+  flex: none; min-width: 3.4em;
+}
+.rl-time:last-child { text-align: right; }
+.rl-seek {
+  flex: 1 1 auto; min-width: 0; margin: 0; height: 24px;
+  accent-color: var(--accent); background: none; cursor: pointer;
+}
+
+/* Five controls, evenly spread, every one of them a 44px target. Play is the
+   only one that is bigger, because it is the one he presses without looking. */
+.rl-transport {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 4px; margin: 2px 0;
+}
+.rl-tbtn {
+  display: inline-flex; align-items: center; justify-content: center;
+  min-width: 44px; min-height: 44px; padding: 0;
+  font: inherit; background: none; border: 0; cursor: pointer; color: var(--text2);
+}
+.rl-tbtn:hover { color: var(--text); }
+.rl-tbtn-play { color: var(--text); min-width: 52px; }
+.rl-tbtn-play svg:last-child { display: none; }
+.rl-tbtn-play[data-on="1"] svg:first-child { display: none; }
+.rl-tbtn-play[data-on="1"] svg:last-child { display: inline; }
+
+/* One line, and it stays one line at 390px: who is reading and for how long,
+   the speeds, and Close. Wrapping is off rather than merely unlikely — a
+   voice with a longer name would otherwise push Close onto a row of its own,
+   which is the row this change exists to remove. The name is the only thing
+   that can give, so it is the only thing that ellipses. */
+.rl-audio-row { display: flex; flex-wrap: nowrap; align-items: center; gap: 10px; }
+.rl-audio-name {
+  font-size: 13px; color: var(--text2); flex: 1 1 auto; min-width: 0;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.rl-speeds { display: flex; align-items: center; gap: 12px; flex: none; }
+.rl-speeds button {
+  display: inline-flex; align-items: center; min-height: 44px;
+  font: inherit; font-size: 13px; background: none; border: 0; padding: 0; cursor: pointer; color: var(--text3);
+}
+.rl-speeds button[aria-pressed="true"] { color: var(--text); text-decoration: underline; text-decoration-thickness: 1px; text-underline-offset: 3px; }
+.rl-audio-close {
+  display: inline-flex; align-items: center; min-height: 44px;
+  font: inherit; font-size: 13px; background: none; border: 0; padding: 0; cursor: pointer;
+  color: var(--text3); flex: none;
+}
+.rl-audio-close:hover { color: var(--text); text-decoration: underline; text-decoration-thickness: 1px; text-underline-offset: 3px; }
+
+/* The way back when he has scrolled away from what is playing. It sits just
+   above the player, out of the text, and is only ever there when it is the
+   answer to something he did. */
+.rl-follow {
+  position: fixed; left: 50%; transform: translateX(-50%);
+  bottom: calc(var(--rl-bar-h, 60px) + var(--rl-audio-h, 0px) + 12px); z-index: 7;
+  font: inherit; font-size: 13px; min-height: 36px; padding: 0 14px;
+  color: var(--text); background: var(--bg);
+  border: 1px solid var(--border); border-radius: 18px; cursor: pointer;
+}
+.rl-follow[hidden] { display: none; }
+.rl-follow:hover { border-color: var(--accent); }
+
+/* Room for the player, so the last paragraph is still readable while it plays.
+   Measured rather than guessed: the bar wraps on a phone and so does the row
+   under the transport. */
+body[data-audio="1"] main {
+  padding-bottom: calc(var(--rl-bar-h, 60px) + var(--rl-audio-h, 180px) + 40px);
+}
+/* The mark on the paragraph being read. The hairline is reserved on every
+   block the moment audio is up, so the line does not jump sideways as it moves. */
+.rl-body.rl-audio-on .md p, .rl-body.rl-audio-on .md h2,
+.rl-body.rl-audio-on .md h3, .rl-body.rl-audio-on .md li {
+  border-left: 1px solid transparent; padding-left: 14px; margin-left: -15px;
+}
+.rl-body.rl-audio-on .md .rl-said { border-left-color: var(--accent); }
+.rl-body.rl-audio-on .md p, .rl-body.rl-audio-on .md h2, .rl-body.rl-audio-on .md h3 { cursor: pointer; }
+/* The sentence being spoken. The paragraph keeps its hairline — that is the
+   coarse "you are here" — and this is the line itself, tinted rather than
+   boxed so it reads as emphasis and not as a control. A sentence that runs
+   across a link or a highlight is several spans; clone makes each of them
+   carry the tint instead of one long box with holes in it. */
+.rl-body.rl-audio-on .md .rl-now {
+  background: var(--surface);
+  border-radius: 2px;
+  box-decoration-break: clone; -webkit-box-decoration-break: clone;
+}
+/* The tint wants the accent at a tenth of itself, which needs color-mix. The
+   Daylight and anything else that has not got it keep the flat surface above,
+   which is quieter but still reads as the line being spoken. */
+@supports (background: color-mix(in srgb, red 15%, transparent)) {
+  .rl-body.rl-audio-on .md .rl-now {
+    background: color-mix(in srgb, var(--accent) 15%, transparent);
+  }
+}
+.rl-body.rl-audio-on .md .rl-sent { cursor: pointer; }
+
+@media (max-width: 640px) {
+  .rl-h1 { font-size: 28px; margin-top: 56px; }
+  .rl-body { margin-top: 40px; }
+  .rl-body .md { font-size: 17px; }
+  .rl-keys-cols { grid-template-columns: 1fr; }
+}
+
+/* How many of his changes have not reached the Mac yet. It sits in the minor
+   row with the other quiet words rather than anywhere louder: it is a fact
+   about the connection, not a warning, and it goes away on its own. */
+.rl-queued { cursor: default; color: var(--text3); }
+.rl-queued:hover { color: var(--text3); text-decoration: none; }
+.rl-queued[hidden] { display: none; }

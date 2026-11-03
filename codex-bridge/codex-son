@@ -1,0 +1,134 @@
+#!/usr/bin/env bash
+# codex-son — durable launcher for a Codex-backed kushbot slot.
+#
+# Runs `bun bridge.ts` inside a detached tmux session under a supervisor loop, so
+# a crash auto-respawns (and thread/resume restores the conversation from the
+# persisted threadId). Parameterized like the bridge: --slot / --persona / --cwd
+# / --home. Defaults = slot3 / kush3, so a bare `codex-son start` is a smoke test.
+#
+# Usage:
+#   codex-son start  [--slot N] [--persona PATH] [--cwd DIR] [--home DIR] [--model ID] [--effort LVL]
+#   codex-son stop   [--slot N]
+#   codex-son status [--slot N]
+#   codex-son logs   [--slot N]     # dump the tmux pane
+#
+# tmux session name = codex-slot<N> (distinct from the Claude pool's kush-slot<N>
+# so the two can't collide).
+set -euo pipefail
+
+# Portable path resolution (P1-14 — was hardcoded to /Users/owner).
+# BRIDGE is colocated with this script; BUN/KUSHBOTS derive from env or $HOME.
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+BRIDGE="${KUSHBOT_BRIDGE:-$SELF_DIR/bridge.ts}"
+BUN="${KUSHBOT_BUN:-$(command -v bun || echo "$HOME/.bun/bin/bun")}"
+# Mac runs a slot POOL under channels/kushbots/slot<N>; server runs one HOME per
+# bot (channels/telegram). codex-son here assumes the Mac pool layout — on server
+# use the per-HOME supervisor (~/kai/codex-kai4.sh). KUSHBOTS is $HOME-derived so
+# it's at least machine-portable within the pool model.
+KUSHBOTS="${KUSHBOT_POOL_DIR:-$HOME/.claude/channels/kushbots}"
+
+# ---- defaults (all $HOME-relative; override with the flags) ----
+SLOT=3
+PERSONA="${CODEX_PERSONA:-}"   # resolved after arg-parse so --slot picks the persona
+CWD="${CODEX_CWD:-$HOME}"
+HOME_ARG="$HOME"
+MODEL=""                       # optional: forwarded to bridge.ts --model
+EFFORT=""                      # optional: forwarded to bridge.ts --effort
+
+CMD="${1:-}"; shift || true
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --slot)    SLOT="$2"; shift 2 ;;
+    --persona) PERSONA="$2"; shift 2 ;;
+    --cwd)     CWD="$2"; shift 2 ;;
+    --home)    HOME_ARG="$2"; shift 2 ;;
+    --model)   MODEL="$2"; shift 2 ;;
+    --effort)  EFFORT="$2"; shift 2 ;;
+    *) echo "unknown arg: $1" >&2; exit 2 ;;
+  esac
+done
+
+PERSONA="${PERSONA:-$HOME/.codex/kush${SLOT}/AGENTS.md}"   # slot-aware default
+SESSION="codex-slot${SLOT}"
+CLAIM="$KUSHBOTS/slot${SLOT}/claimed_by.pid"
+ACCESS="$KUSHBOTS/slot${SLOT}/access.json"
+ENVF="$KUSHBOTS/slot${SLOT}/.env"
+
+slot_claimed() {
+  [[ -f "$CLAIM" ]] || return 1
+  local pid; pid="$(cat "$CLAIM" 2>/dev/null || true)"
+  [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null
+}
+
+start() {
+  # ---- preflight ----
+  [[ -f "$PERSONA" ]] || { echo "✗ persona file not found: $PERSONA" >&2; exit 1; }
+  grep -q 'TELEGRAM_BOT_TOKEN' "$ENVF" 2>/dev/null || { echo "✗ no TELEGRAM_BOT_TOKEN for slot$SLOT ($ENVF)" >&2; exit 1; }
+  if slot_claimed; then
+    echo "✗ slot$SLOT is CLAIMED by pid $(cat "$CLAIM") — refusing (won't stomp a live session)." >&2
+    echo "  Stop that session first, or pick a free slot." >&2
+    exit 1
+  fi
+  if tmux has-session -t "$SESSION" 2>/dev/null; then
+    echo "✗ tmux session '$SESSION' already exists (already running?). Use: codex-son stop --slot $SLOT" >&2
+    exit 1
+  fi
+
+  # ---- supervisor loop: respawn on crash; resume restores context ----
+  local extra=""
+  [[ -n "$MODEL"  ]] && extra="$extra --model '$MODEL'"
+  [[ -n "$EFFORT" ]] && extra="$extra --effort '$EFFORT'"
+  local loop
+  loop="while true; do echo \"[codex-son] launching bridge \$(date '+%H:%M:%S')\"; \
+'$BUN' '$BRIDGE' --slot '$SLOT' --persona '$PERSONA' --cwd '$CWD' --home '$HOME_ARG'$extra; \
+code=\$?; echo \"[codex-son] bridge exited (\$code) — respawn in 2s\"; sleep 2; done"
+  tmux new-session -d -s "$SESSION" "$loop"
+
+  echo "✓ codex-son started on slot$SLOT (persona: $PERSONA${MODEL:+, model: $MODEL}${EFFORT:+, effort: $EFFORT})"
+  echo "  tmux session : $SESSION"
+  echo "  tail logs    : codex-son logs --slot $SLOT   (or: tmux attach -t $SESSION)"
+  echo "  stop         : codex-son stop --slot $SLOT"
+}
+
+stop() {
+  # Kill the tmux session → stops the supervisor loop (no respawn) and SIGHUPs the
+  # bridge (which fast-shuts-down: frees the slot + clears 👀). Then a belt-and-
+  # suspenders sweep guarantees the slot + ackReaction are clean even if signals
+  # were messy.
+  if tmux has-session -t "$SESSION" 2>/dev/null; then
+    tmux kill-session -t "$SESSION"
+    echo "✓ killed tmux session $SESSION"
+  else
+    echo "· no tmux session $SESSION"
+  fi
+  sleep 1
+  # Remove a now-stale claim (dead pid) — never a live one.
+  if [[ -f "$CLAIM" ]]; then
+    pid="$(cat "$CLAIM" 2>/dev/null || true)"
+    if [[ -n "$pid" ]] && ! kill -0 "$pid" 2>/dev/null; then rm -f "$CLAIM"; echo "✓ removed stale claim (dead pid $pid)"; fi
+  fi
+  # Clear a leftover 👀 ackReaction.
+  if [[ -f "$ACCESS" ]] && grep -q 'ackReaction' "$ACCESS"; then
+    "$BUN" -e "const f=process.argv[1];const fs=require('fs');const o=JSON.parse(fs.readFileSync(f,'utf8'));delete o.ackReaction;fs.writeFileSync(f,JSON.stringify(o,null,2)+'\n')" "$ACCESS" \
+      && echo "✓ cleared leftover ackReaction on slot$SLOT"
+  fi
+}
+
+status() {
+  if tmux has-session -t "$SESSION" 2>/dev/null; then echo "tmux $SESSION : RUNNING"; else echo "tmux $SESSION : (not running)"; fi
+  if slot_claimed; then echo "slot$SLOT       : claimed by pid $(cat "$CLAIM")"; else echo "slot$SLOT       : free"; fi
+  [[ -f "$ACCESS" ]] && grep -q ackReaction "$ACCESS" && echo "ackReaction    : set (👀)" || echo "ackReaction    : none"
+}
+
+logs() {
+  tmux has-session -t "$SESSION" 2>/dev/null || { echo "no tmux session $SESSION" >&2; exit 1; }
+  tmux capture-pane -t "$SESSION" -p -S -200
+}
+
+case "$CMD" in
+  start)  start ;;
+  stop)   stop ;;
+  status) status ;;
+  logs)   logs ;;
+  *) echo "usage: codex-son {start|stop|status|logs} [--slot N] [--persona PATH] [--cwd DIR] [--home DIR] [--model ID] [--effort LVL]" >&2; exit 2 ;;
+esac

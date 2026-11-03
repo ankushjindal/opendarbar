@@ -1,0 +1,4 @@
+# secrets never live here — they are in ~/.config/tgs/
+*.session
+creds.json
+__pycache__/

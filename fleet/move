@@ -1,0 +1,432 @@
+#!/usr/bin/env bash
+# move — move a running Claude Code or Codex session (one tmux pane) between the
+# Mac and server: transcript + working tree + relaunch in tmux on the other side.
+# v1 (2026-09-04): tmux → tmux, monorepo paths only, no Telegram changes.
+# Run from the Mac. Cut by default (source process killed after the destination
+# is verified; transcripts are never deleted). Docs: docs/MOVE.md.
+#
+#   move <tmux-target> to-server|to-mac [--copy] [--wip commit|refuse] [--dry-run] [--force]
+#   move --resume <move-id> | --rollback <move-id> | list | show <move-id>
+#   move stage <stage> <state.json>          (internal; runs on whichever machine owns the stage)
+#
+# <tmux-target> = session name (one agent pane) or session:window.pane (several).
+# Stages: preflight → quiesce → carry → copy → launch (incl. verify) → cut → report.
+# Progress lives in ~/.claude/channels/fleet/moves/<move-id>.json so a failed move
+# can be resumed (--resume) or undone (--rollback).
+set -uo pipefail
+
+# ---------------------------------------------------------------------------
+# machine facts (resolved locally on whichever machine this instance runs on)
+# ---------------------------------------------------------------------------
+if [ "$(uname)" = "Darwin" ]; then
+  ME=mac; MY_HOME=/Users/owner; PREFIX="$MY_HOME/work/monorepo"
+  CLAUDE_BIN="$MY_HOME/.local/bin/claude"; CODEX_BIN=/opt/homebrew/bin/codex
+  KD="$MY_HOME/.claude/plugins/local/kushbot"; CTL="$KD/fleet/macctl"
+else
+  ME=server; MY_HOME=/home/owner; PREFIX="$MY_HOME/monorepo"
+  CLAUDE_BIN="$MY_HOME/.local/bin/claude"; CODEX_BIN="$MY_HOME/.local/bin/codex"
+  KD="$MY_HOME/kai/KushDarbar"; CTL="$KD/fleet/fleet-ctl"
+fi
+REG="$MY_HOME/.claude/channels/fleet/registry.json"
+MOVES="$MY_HOME/.claude/channels/fleet/moves"; mkdir -p "$MOVES"
+SRV=server                      # ssh alias for server (from the Mac)
+REMOTE_KD=/home/owner/kai/KushDarbar
+REMOTE_HOME=/home/owner
+PROTECTED='^(main|master|staging|production)$'
+
+note() { printf '➜ %s\n' "$*"; }
+ok()   { printf '✓ %s\n' "$*"; }
+die()  { printf '✗ %s\n' "$*" >&2; exit 1; }
+enc()  { printf '%s' "${1//\//-}"; }   # claude project-dir encoding: /a/b → -a-b
+ts()   { date -u +%FT%TZ; }
+nonce(){ LC_ALL=C tr -dc 'a-z0-9' </dev/urandom | head -c 8; }
+
+# state helpers: every stage reads/writes ONE json file
+S=""                                   # path of the state file for this run
+sget() { jq -r "$1 // empty" "$S"; }
+sset() { local tmp; tmp=$(mktemp); jq "$@" "$S" > "$tmp" && mv "$tmp" "$S"; }   # sset '.a.b = $v' --arg v x
+stage_done() { sset '.stages[$k] = $t' --arg k "$1" --arg t "$(ts)"; }
+stage_ok()   { [ -n "$(jq -r --arg k "$1" '.stages[$k] // empty' "$S")" ]; }
+
+# ---------------------------------------------------------------------------
+# process helpers
+# ---------------------------------------------------------------------------
+# descendants of a pid, breadth-first, as "pid args" lines
+descendants() {
+  local root="$1" all; all=$(ps -eo pid=,ppid=,args= 2>/dev/null)
+  local queue=("$root") pid
+  while [ ${#queue[@]} -gt 0 ]; do
+    pid=${queue[0]}; queue=("${queue[@]:1}")
+    while read -r cpid cppid cargs; do
+      [ "$cppid" = "$pid" ] || continue
+      printf '%s %s\n' "$cpid" "$cargs"; queue+=("$cpid")
+    done <<< "$all"
+  done
+}
+# first agent process under a tmux pane pid: prints "pid kind" (kind=claude|codex)
+agent_in_pane() {
+  descendants "$1" | while read -r pid args; do
+    case " $args " in *" --agent-id "*) continue;; esac          # claude subagents
+    local b; b=$(printf '%s' "$args" | awk '{print $1}'); b=${b##*/}
+    case "$b" in
+      claude) echo "$pid claude"; return;;
+      codex)  echo "$pid codex";  return;;
+    esac
+  done | head -1
+}
+proc_cwd() {
+  if [ "$ME" = mac ]; then lsof -a -p "$1" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' | head -1
+  else readlink "/proc/$1/cwd" 2>/dev/null; fi
+}
+# tmux target → "session window pane pane_pid"
+pane_info() { tmux display -p -t "$1" '#{session_name} #{window_index} #{pane_index} #{pane_pid}' 2>/dev/null; }
+
+# ---------------------------------------------------------------------------
+# STAGE: preflight (source machine). Resolves the pane, the agent, git state.
+# ---------------------------------------------------------------------------
+st_preflight() {
+  local target; target=$(sget .src.target)
+  local sess="${target%%:*}"
+  tmux has-session -t "$sess" 2>/dev/null || die "no tmux session '$sess' on $ME"
+  # enumerate agent panes in the session (or the single named pane)
+  local panes=() line
+  if [ "$target" = "$sess" ]; then
+    while read -r line; do panes+=("$line"); done < <(tmux list-panes -s -t "$sess" -F '#{session_name}:#{window_index}.#{pane_index} #{pane_pid}')
+  else
+    panes+=("$(tmux display -p -t "$target" '#{session_name}:#{window_index}.#{pane_index} #{pane_pid}')")
+  fi
+  local found=() p pid ag
+  for line in "${panes[@]}"; do
+    p=${line%% *}; pid=${line##* }
+    ag=$(agent_in_pane "$pid"); [ -n "$ag" ] && found+=("$p $ag")
+  done
+  [ ${#found[@]} -gt 0 ] || die "no claude/codex process under '$target'"
+  if [ ${#found[@]} -gt 1 ]; then
+    printf '✗ several agent panes in %s; name one:\n' "$sess" >&2
+    for f in "${found[@]}"; do printf '    move %s %s\n' "${f%% *}" "$(sget .direction)" >&2; done
+    exit 1
+  fi
+  local pane apid kind; read -r pane apid kind <<< "${found[0]}"
+  local cwd; cwd=$(proc_cwd "$apid"); [ -n "$cwd" ] || die "cannot read cwd of pid $apid"
+  case "$cwd" in "$PREFIX"*) ;; *) die "cwd '$cwd' is outside monorepo; v1 moves monorepo/ sessions only";; esac
+  # git
+  local top branch dirty ahead worktree mainrepo gitdir common
+  top=$(git -C "$cwd" rev-parse --show-toplevel 2>/dev/null) || die "cwd is not a git checkout"
+  branch=$(git -C "$cwd" rev-parse --abbrev-ref HEAD)
+  [ "$branch" != HEAD ] || die "detached HEAD at $top; check out a branch first"
+  dirty=$(git -C "$cwd" status --porcelain | sed 's/^...//' | sort)
+  ahead=$(git -C "$cwd" rev-list --count '@{u}..HEAD' 2>/dev/null || echo "no-upstream")
+  gitdir=$(git -C "$cwd" rev-parse --git-dir); common=$(git -C "$cwd" rev-parse --git-common-dir)
+  worktree=false; mainrepo=""
+  if [ "$(cd "$cwd" && realpath "$gitdir")" != "$(cd "$cwd" && realpath "$common")" ]; then
+    worktree=true; mainrepo=$(dirname "$(cd "$cwd" && realpath "$common")")
+  fi
+  local reg_agent=""; [ -f "$REG" ] && reg_agent=$(jq -r --arg t "$sess" '.agents[] | select(.tmux == $t) | .name' "$REG" 2>/dev/null | head -1)
+  # live subagents block the move (they hold the worktree)
+  local subs=0
+  sset '.src += {pane:$pane, pid:($pid|tonumber), kind:$kind, cwd:$cwd, top:$top, branch:$branch, ahead:$ahead, worktree:($wt=="true"), mainrepo:$mr, reg_agent:$ra, dirty:($dirty|split("\n")|map(select(length>0)))}' \
+    --arg pane "$pane" --arg pid "$apid" --arg kind "$kind" --arg cwd "$cwd" --arg top "$top" --arg branch "$branch" \
+    --arg ahead "$ahead" --arg wt "$worktree" --arg mr "$mainrepo" --arg ra "$reg_agent" --arg dirty "$dirty"
+  # decisions
+  local wip; wip=$(sget .opts.wip)
+  if [ -n "$dirty" ]; then
+    [ "$wip" = commit ] || die "working tree dirty and --wip refuse: $(printf '%s' "$dirty" | tr '\n' ' ')"
+    [[ "$branch" =~ $PROTECTED ]] && die "dirty tree on protected branch '$branch'; commit or stash by hand first"
+  fi
+  [ "$ahead" != "no-upstream" ] || note "branch '$branch' has no upstream; carry will push -u origin $branch"
+  stage_done preflight
+}
+
+# ---------------------------------------------------------------------------
+# STAGE: quiesce (source). Freeze the agent; its reply locates the transcript.
+# ---------------------------------------------------------------------------
+st_quiesce() {
+  local pane kind n; pane=$(sget .src.pane); kind=$(sget .src.kind); n=$(sget .nonce)
+  local msg="[move] freeze: finish only the step in progress, take no further external actions (no sends, posts, deploys, git push), then reply with the token $n prefixed by MOVE-READY- and nothing else."
+  tmux send-keys -t "$pane" -l "$msg"; sleep 1; tmux send-keys -t "$pane" Enter
+  local i pane_txt; for i in $(seq 1 60); do
+    sleep 5
+    pane_txt=$(tmux capture-pane -t "$pane" -p -S -40 2>/dev/null)
+    printf '%s' "$pane_txt" | grep -q "MOVE-READY-$n" && break
+    [ "$i" = 60 ] && die "no MOVE-READY after 5 min; session still busy. Nothing was changed."
+  done
+  ok "agent frozen"
+  # locate transcript by the token (only the reply contains it concatenated)
+  local jsonl=""
+  if [ "$kind" = claude ]; then
+    jsonl=$(find "$MY_HOME/.claude/projects" -maxdepth 2 -name '*.jsonl' -mmin -30 -exec grep -l "MOVE-READY-$n" {} + 2>/dev/null | head -1)
+  else
+    jsonl=$(find "$MY_HOME/.codex/sessions" -name 'rollout-*.jsonl' -mmin -30 -exec grep -l "MOVE-READY-$n" {} + 2>/dev/null | head -1)
+  fi
+  [ -n "$jsonl" ] || die "could not find the transcript containing MOVE-READY-$n"
+  local sid pcwd
+  if [ "$kind" = claude ]; then
+    sid=$(basename "$jsonl" .jsonl)
+    pcwd=$(grep -o '"cwd":"[^"]*"' "$jsonl" | tail -1 | cut -d'"' -f4)
+  else
+    sid=$(grep -o '"session_id":"[^"]*"' "$jsonl" | head -1 | cut -d'"' -f4)
+    pcwd=$(grep -o '"cwd":"[^"]*"' "$jsonl" | head -1 | cut -d'"' -f4)
+  fi
+  [ -n "$pcwd" ] || pcwd=$(sget .src.cwd)
+  # things that will not travel
+  local crons tasks subs plans
+  crons=$(grep -o '"name":"CronCreate"' "$jsonl" | wc -l | tr -d ' ')
+  tasks=$(grep -o '"run_in_background":true' "$jsonl" | wc -l | tr -d ' ')
+  subs=$(pgrep -f -- "--parent-session-id $sid" 2>/dev/null | wc -l | tr -d ' ')
+  plans=$(grep -o "$MY_HOME/\.claude/plans/[A-Za-z0-9._-]*\.md" "$jsonl" | sort -u | tr '\n' ' ')
+  [ "${subs:-0}" = 0 ] || die "$subs live subagent(s) belong to this session; wait for them to finish"
+  sset '.src += {sid:$sid, jsonl:$j, pcwd:$p, crons:($c|tonumber), bgtasks:($t|tonumber), plans:$pl}' \
+    --arg sid "$sid" --arg j "$jsonl" --arg p "$pcwd" --arg c "$crons" --arg t "$tasks" --arg pl "$plans"
+  ok "session $sid ($kind), transcript $jsonl"
+  stage_done quiesce
+}
+
+# ---------------------------------------------------------------------------
+# STAGE: carry (source). Git only: wip commit if dirty, push.
+# ---------------------------------------------------------------------------
+st_carry() {
+  local cwd branch; cwd=$(sget .src.cwd); branch=$(sget .src.branch)
+  local ndirty; ndirty=$(jq '.src.dirty | length' "$S")
+  if [ "$ndirty" -gt 0 ]; then
+    git -C "$cwd" add -A && git -C "$cwd" commit -q -m "wip: move $(sget .src.target) $(sget .id) $(ts)" || die "wip commit failed"
+    sset '.src.wip = true'; ok "wip commit ($ndirty paths) on $branch"
+  else sset '.src.wip = false'; fi
+  if ! git -C "$cwd" push -q -u origin "$branch" 2>/tmp/move-push.err; then
+    [ "$(sget .src.wip)" = true ] && git -C "$cwd" reset -q --soft HEAD~1 && git -C "$cwd" reset -q && sset '.src.wip = false'
+    die "push failed: $(cat /tmp/move-push.err | tail -2)"
+  fi
+  sset '.src.head = $h' --arg h "$(git -C "$cwd" rev-parse HEAD)"
+  ok "pushed $branch @ $(git -C "$cwd" rev-parse --short HEAD)"
+  stage_done carry
+}
+
+# ---------------------------------------------------------------------------
+# STAGE: launch (destination). Checkout, restore dirtiness, relaunch, verify.
+# ---------------------------------------------------------------------------
+st_launch() {
+  local kind sid branch wip worktree; kind=$(sget .src.kind); sid=$(sget .src.sid); branch=$(sget .src.branch)
+  wip=$(sget .src.wip); worktree=$(sget .src.worktree)
+  local cwd top mainrepo tmuxn jsonl msg
+  cwd=$(sget .dst.cwd); top=$(sget .dst.top); mainrepo=$(sget .dst.mainrepo); tmuxn=$(sget .dst.tmux); jsonl=$(sget .dst.jsonl)
+  # working tree
+  if [ "$worktree" = true ] && [ ! -d "$top" ]; then
+    [ -d "$mainrepo" ] || die "main repo $mainrepo missing on $ME"
+    git -C "$mainrepo" fetch -q origin "$branch" || die "fetch $branch failed"
+    if git -C "$mainrepo" show-ref -q --verify "refs/heads/$branch"; then git -C "$mainrepo" worktree add -q "$top" "$branch"
+    else git -C "$mainrepo" worktree add -q --track -b "$branch" "$top" "origin/$branch"; fi || die "worktree add failed"
+    ok "worktree $top added"
+  fi
+  [ -d "$top" ] || die "checkout $top missing on $ME (clone/init the submodule first)"
+  local got want; want=$(jq -r '.src.dirty[]' "$S" | sort)
+  got=$(git -C "$top" status --porcelain | sed 's/^...//' | sort)
+  if [ "$(git -C "$top" rev-parse --abbrev-ref HEAD)" = "$branch" ] && [ "$got" = "$want" ] && [ -n "$(sget .dst.checked_out)" ]; then
+    ok "tree already prepared (resume)"
+  else
+    [ -z "$got" ] || die "destination tree $top is dirty; refusing to clobber"
+    git -C "$top" fetch -q origin "$branch" || die "fetch $branch failed"
+    if git -C "$top" show-ref -q --verify "refs/heads/$branch"; then
+      git -C "$top" checkout -q "$branch" && git -C "$top" reset -q --hard "origin/$branch"
+    else git -C "$top" checkout -q -t "origin/$branch"; fi || die "checkout $branch failed"
+    [ "$(git -C "$top" rev-parse HEAD)" = "$(sget .src.head)" ] || die "HEAD mismatch after checkout"
+    if [ "$wip" = true ]; then
+      git -C "$top" reset -q --soft HEAD~1 && git -C "$top" reset -q; ok "wip commit unwrapped; tree dirty again"
+      # origin must not keep the wip commit: force it back to the real head (lease = the wip head we pushed)
+      git -C "$top" push -q --force-with-lease="refs/heads/$branch:$(sget .src.head)" origin "HEAD:$branch" && ok "origin/$branch reset to $(git -C "$top" rev-parse --short HEAD) (wip commit dropped)" || note "could not drop the wip commit from origin/$branch; do it by hand: git push --force-with-lease origin HEAD:$branch"
+    fi
+    got=$(git -C "$top" status --porcelain | sed 's/^...//' | sort)
+    [ "$got" = "$want" ] || { printf 'want:\n%s\ngot:\n%s\n' "$want" "$got" >&2; die "dirty-file set differs at destination"; }
+    sset '.dst.checked_out = $t' --arg t "$(ts)"
+  fi
+  # tmux name (prefixed with origin; -2, -3 on collision)
+  if [ -n "$(sget .dst.tmux_final)" ]; then tmuxn=$(sget .dst.tmux_final); tmux kill-session -t "$tmuxn" 2>/dev/null; note "resume: reusing tmux $tmuxn"
+  else local base="$tmuxn" k=2; while tmux has-session -t "$tmuxn" 2>/dev/null; do tmuxn="$base-$k"; k=$((k+1)); done; fi
+  sset '.dst.tmux = $t | .dst.tmux_final = $t' --arg t "$tmuxn"
+  # launcher
+  local msgf="/tmp/move-$(sget .id).msg" launch="/tmp/move-$(sget .id).sh"; sget .handoff > "$msgf"
+  if [ "$kind" = claude ]; then
+    printf '#!/bin/bash\ncd "%s" || exit 1\nexec %s --dangerously-skip-permissions -r %s "$(cat %s)"\n' "$cwd" "$CLAUDE_BIN" "$sid" "$msgf" > "$launch"
+  else
+    printf '#!/bin/bash\ncd "%s" || exit 1\nexec %s resume %s "$(cat %s)"\n' "$cwd" "$CODEX_BIN" "$sid" "$msgf" > "$launch"
+  fi
+  chmod +x "$launch"
+  tmux new-session -d -s "$tmuxn" -c "$cwd" "bash $launch; exec ${SHELL:-bash}" || die "tmux launch failed"
+  # auto-confirm startup prompts, then wait for the ack token
+  local n2 i pane_txt; n2=$(sget .nonce2)
+  for i in $(seq 1 48); do
+    sleep 5
+    pane_txt=$(tmux capture-pane -t "$tmuxn" -p -S -60 2>/dev/null)
+    if printf '%s' "$pane_txt" | grep -q "MOVE-ACK-$n2"; then ok "destination acknowledged"; stage_done launch; return 0; fi
+    if printf '%s' "$pane_txt" | grep -q 'Keep current model'; then tmux send-keys -t "$tmuxn" Down; sleep 1; tmux send-keys -t "$tmuxn" Enter; continue; fi
+    # claude's trust prompt defaults to "No, exit": pick the second option
+    if printf '%s' "$pane_txt" | grep -q 'Yes, I trust this folder'; then tmux send-keys -t "$tmuxn" Down; sleep 1; tmux send-keys -t "$tmuxn" Enter; continue; fi
+    if printf '%s' "$pane_txt" | grep -qiE 'Do you trust the contents|development channel|Yes, proceed|Resume from summary|Use session directory|Resume goal|Press enter to continue'; then
+      tmux send-keys -t "$tmuxn" Enter; continue
+    fi
+    if printf '%s' "$pane_txt" | grep -qiE 'usage limit|not logged in|login'; then die "destination agent cannot run: $(printf '%s' "$pane_txt" | grep -iE 'usage limit|not logged in|login' | head -1)"; fi
+  done
+  die "no MOVE-ACK from the destination within 4 min (tmux $tmuxn left running for inspection)"
+}
+
+# ---------------------------------------------------------------------------
+# STAGE: cut (source). Park registered sons, kill the agent, leave a note.
+# ---------------------------------------------------------------------------
+st_cut() {
+  local pane pid ra; pane=$(sget .src.pane); pid=$(sget .src.pid); ra=$(sget .src.reg_agent)
+  local dst_desc="$(sget .dst.machine):$(sget .dst.tmux)"
+  if [ -n "$ra" ] && [ -f "$REG" ]; then
+    "$CTL" park "$ra" >/dev/null 2>&1 || note "park via $CTL failed; setting registry directly"
+    local tmp; tmp=$(mktemp)
+    jq --arg n "$ra" --arg st "moved:$dst_desc" --arg t "$(ts)" '(.agents[] | select(.name == $n)) |= (.parked = true | .state = $st | .movedAt = $t)' "$REG" > "$tmp" && mv "$tmp" "$REG"
+    ok "registry: $ra parked, state moved:$dst_desc"
+  fi
+  kill -TERM "$pid" 2>/dev/null; sleep 4; kill -0 "$pid" 2>/dev/null && kill -9 "$pid" 2>/dev/null
+  sleep 1
+  tmux respawn-pane -k -t "$pane" "printf '\n  [move] this session moved to %s on %s. Transcript kept at %s\n  rollback: %s/fleet/move --rollback %s\n\n' '$dst_desc' '$(ts)' '$(sget .src.jsonl)' '$KD' '$(sget .id)'; exec ${SHELL:-bash}" 2>/dev/null || true
+  ok "source killed; pane holds the note"
+  stage_done cut
+}
+
+# rollback stages
+st_restore() {   # source: unpark + relaunch from the kept transcript, undo wip locally
+  local pane kind sid cwd ra; pane=$(sget .src.pane); kind=$(sget .src.kind); sid=$(sget .src.sid); cwd=$(sget .src.cwd); ra=$(sget .src.reg_agent)
+  if [ "$(sget .src.wip)" = true ] && [ "$(git -C "$cwd" rev-parse HEAD)" = "$(sget .src.head)" ]; then
+    git -C "$cwd" reset -q --soft HEAD~1 && git -C "$cwd" reset -q && ok "wip commit unwrapped locally"
+    local branch; branch=$(sget .src.branch)
+    git -C "$cwd" push -q --force-with-lease="refs/heads/$branch:$(sget .src.head)" origin "HEAD:$branch" 2>/dev/null && ok "origin/$branch reset (wip commit dropped)" || note "origin/$branch may still carry the wip commit; check before force-pushing"
+  fi
+  if [ -n "$ra" ] && [ -f "$REG" ]; then
+    local tmp; tmp=$(mktemp)
+    jq --arg n "$ra" '(.agents[] | select(.name == $n)) |= (.parked = false | del(.state) | del(.movedAt))' "$REG" > "$tmp" && mv "$tmp" "$REG"
+  fi
+  local msg="[move] rolled back: you are running on the original machine again ($ME). The destination copy was killed. Continue."
+  local cmd; if [ "$kind" = claude ]; then cmd="cd '$cwd' && exec $CLAUDE_BIN --dangerously-skip-permissions -r $sid '$msg'"; else cmd="cd '$cwd' && exec $CODEX_BIN resume $sid '$msg'"; fi
+  tmux respawn-pane -k -t "$pane" "$cmd" 2>/dev/null || tmux new-session -d -s "$(sget .src.target)" "$cmd"
+  ok "source relaunched in $pane"
+}
+st_destkill() {  # destination: kill the moved tmux, leave the tree alone (reported)
+  local t; t=$(sget .dst.tmux); tmux kill-session -t "$t" 2>/dev/null && ok "killed tmux $t on $ME" || note "no tmux $t on $ME"
+}
+
+# ---------------------------------------------------------------------------
+# orchestrator (runs on the Mac). Source/destination stages run locally or over ssh.
+# ---------------------------------------------------------------------------
+run_on() { # machine stage statefile
+  if [ "$1" = "$ME" ]; then "$0" stage "$2" "$3"; return; fi
+  local rs="/tmp/$(basename "$3")"
+  scp -q "$3" "$SRV:$rs" && ssh "$SRV" "$REMOTE_KD/fleet/move stage $2 $rs"; local rc=$?
+  scp -q "$SRV:$rs" "$3" 2>/dev/null; return $rc
+}
+map_path() { # path from-machine → to-machine (monorepo/ prefix swap)
+  local p="$1" from="$2"
+  if [ "$from" = mac ]; then printf '%s' "/home/owner/monorepo${p#/Users/owner/work/monorepo}"
+  else printf '%s' "/Users/owner/work/monorepo${p#/home/owner/monorepo}"; fi
+}
+copy_transcript() { # orchestrator: src → dst with prefix rewrite (+ plan files)
+  local src=$(sget .src.machine) dst=$(sget .dst.machine) kind=$(sget .src.kind) sj=$(sget .src.jsonl) dj=$(sget .dst.jsonl)
+  local sp dp; if [ "$src" = mac ]; then sp='/Users/owner/work/monorepo'; dp='/home/owner/monorepo'; else sp='/home/owner/monorepo'; dp='/Users/owner/work/monorepo'; fi
+  local tmp="/tmp/move-$(sget .id).jsonl"
+  if [ "$src" = "$ME" ]; then cp "$sj" "$tmp"; else scp -q "$SRV:$sj" "$tmp" || die "fetch transcript failed"; fi
+  sed -i '' -e "s#$sp#$dp#g" "$tmp" 2>/dev/null || sed -i -e "s#$sp#$dp#g" "$tmp"
+  local ddir; ddir=$(dirname "$dj")
+  if [ "$dst" = "$ME" ]; then
+    mkdir -p "$ddir"; [ -f "$dj" ] && cp "$dj" "$dj.bak-$(date +%Y%m%d-%H%M%S)"; cp "$tmp" "$dj"
+  else
+    ssh "$SRV" "mkdir -p '$ddir'; [ -f '$dj' ] && cp '$dj' '$dj.bak-$(date +%Y%m%d-%H%M%S)' || true"
+    scp -q "$tmp" "$SRV:$dj" || die "copy transcript failed"
+  fi
+  # plan files (claude only)
+  local pl; for pl in $(sget .src.plans); do
+    local dpl; dpl="$( [ "$dst" = mac ] && echo /Users/owner || echo /home/owner )/.claude/plans/$(basename "$pl")"
+    if [ "$src" = "$ME" ] && [ "$dst" != "$ME" ]; then ssh "$SRV" "mkdir -p $(dirname "$dpl")"; scp -q "$pl" "$SRV:$dpl"
+    elif [ "$dst" = "$ME" ]; then mkdir -p "$(dirname "$dpl")"; scp -q "$SRV:$pl" "$dpl"; fi
+  done
+  ok "transcript copied to $dst:$dj"
+  stage_done copy
+}
+compose_handoff() {
+  local mode=$(sget .opts.mode) src=$(sget .src.machine) dst=$(sget .dst.machine)
+  local n2=$(sget .nonce2) crons=$(sget .src.crons) bg=$(sget .src.bgtasks) wip=$(sget .src.wip) ndirty=$(jq '.src.dirty|length' "$S")
+  local m="[move] This session was MOVED ($mode) from $src to $dst on $(date '+%a %d %b %Y %H:%M %Z'). You now run on $dst; your cwd is $(sget .dst.cwd) on branch $(sget .src.branch) in the same monorepo repo (paths in earlier messages that start with the $src prefix now live under $(sget .dst.top)). Working tree: $ndirty modified/untracked paths were carried and are dirty again exactly as before (wip commit unwrapped: $wip). Telegram: none on this machine in move v1; the previous slot is gone. Did NOT travel: $crons cron/loop registrations, $bg background tasks, pending asks, files outside the repo (Mac ~/kush/scratch or server ~/kai); recreate what the work needs. Do not move again unless asked. First, reply with the token $n2 prefixed by MOVE-ACK- and nothing else; then re-orient and continue."
+  [ "$mode" = copy ] && m="$m (Copy mode: the original still runs on $src and has been told it is the archive; do not double-fire external actions.)"
+  sset '.handoff = $m' --arg m "$m"
+}
+move_card() {
+  printf '\n  move %s  %s → %s   [%s]\n' "$(sget .src.target)" "$(sget .src.machine)" "$(sget .dst.machine)" "$(sget .id)"
+  printf '  pane      %s  (%s pid %s)\n' "$(sget .src.pane)" "$(sget .src.kind)" "$(sget .src.pid)"
+  printf '  cwd       %s\n  → dst     %s\n' "$(sget .src.cwd)" "$(sget .dst.cwd)"
+  printf '  git       %s @ %s  ahead:%s  dirty:%s  worktree:%s\n' "$(sget .src.branch)" "$(sget .src.top)" "$(sget .src.ahead)" "$(jq '.src.dirty|length' "$S")" "$(jq -r .src.worktree "$S")"
+  [ "$(jq '.src.dirty|length' "$S")" -gt 0 ] && jq -r '.src.dirty[] | "              " + .' "$S"
+  local ra; ra=$(sget .src.reg_agent); [ -n "$ra" ] || ra="not a registered agent"
+  printf '  registry  %s\n  mode      %s   wip:%s\n  dst tmux  %s\n\n' "$ra" "$(sget .opts.mode)" "$(sget .opts.wip)" "$(sget .dst.tmux)"
+}
+attach_line() {
+  if [ "$(sget .dst.machine)" = server ]; then printf 'ssh %s -t tmux attach -t %s\n' "$SRV" "$(sget .dst.tmux)"; else printf 'tmux attach -t %s\n' "$(sget .dst.tmux)"; fi
+}
+
+orchestrate() {
+  local src dst; src=$(sget .src.machine); dst=$(sget .dst.machine)
+  stage_ok preflight || run_on "$src" preflight "$S" || exit 1
+  # destination mapping (from preflight facts)
+  sset '.dst += {cwd:$c, top:$t, mainrepo:$m, tmux:$x}' \
+    --arg c "$(map_path "$(sget .src.cwd)" "$src")" --arg t "$(map_path "$(sget .src.top)" "$src")" \
+    --arg m "$( [ -n "$(sget .src.mainrepo)" ] && map_path "$(sget .src.mainrepo)" "$src" )" --arg x "$src-$(sget .src.target | cut -d: -f1)"
+  move_card
+  if [ "$(sget .opts.dry)" = true ]; then note "dry run: nothing changed. Re-run without --dry-run to move."; exit 0; fi
+  stage_ok quiesce || run_on "$src" quiesce "$S" || exit 1
+  # transcript destination path (needs sid/pcwd from quiesce)
+  local dh; dh=$( [ "$dst" = mac ] && echo /Users/owner || echo /home/owner )
+  if [ "$(sget .src.kind)" = claude ]; then
+    sset '.dst.jsonl = $j' --arg j "$dh/.claude/projects/$(enc "$(map_path "$(sget .src.pcwd)" "$src")")/$(sget .src.sid).jsonl"
+  else
+    sset '.dst.jsonl = $j' --arg j "$dh/.codex/sessions/$(sget .src.jsonl | sed 's#.*/\.codex/sessions/##')"
+  fi
+  stage_ok carry  || run_on "$src" carry "$S" || exit 1
+  stage_ok copy   || copy_transcript
+  compose_handoff
+  stage_ok launch || run_on "$dst" launch "$S" || { note "launch failed; source is frozen but intact. Fix and: move --resume $(sget .id)   or   move --rollback $(sget .id)"; exit 1; }
+  if [ "$(sget .opts.mode)" = cut ]; then
+    stage_ok cut || run_on "$src" cut "$S" || exit 1
+  else
+    tmux_note="[move] copy done: the clone now runs on $dst. You are the archive copy: no further external actions (sends, posts, deploys)."
+    if [ "$src" = "$ME" ]; then tmux send-keys -t "$(sget .src.pane)" -l "$tmux_note"; tmux send-keys -t "$(sget .src.pane)" Enter
+    else ssh "$SRV" "tmux send-keys -t '$(sget .src.pane)' -l '$tmux_note'; tmux send-keys -t '$(sget .src.pane)' Enter"; fi
+  fi
+  sset '.done = $t' --arg t "$(ts)"
+  printf '\n✅ moved. attach:\n  %s\n' "$(attach_line)"
+  printf '   rollback: %s/fleet/move --rollback %s\n' "$KD" "$(sget .id)"
+}
+
+rollback() {
+  local src dst; src=$(sget .src.machine); dst=$(sget .dst.machine)
+  stage_ok launch && { run_on "$dst" destkill "$S" || true; }
+  run_on "$src" restore "$S" || exit 1
+  sset '.rolled_back = $t' --arg t "$(ts)"
+  printf '\n↩ rolled back. destination tree %s on %s was left as is (dirty test files may remain there).\n' "$(sget .dst.top)" "$dst"
+}
+
+# ---------------------------------------------------------------------------
+# entry
+# ---------------------------------------------------------------------------
+case "${1:-}" in
+  stage)
+    S="$3"; [ -f "$S" ] || die "no state file $S"
+    case "$2" in preflight) st_preflight;; quiesce) st_quiesce;; carry) st_carry;; launch) st_launch;; cut) st_cut;; restore) st_restore;; destkill) st_destkill;; *) die "unknown stage $2";; esac; exit $? ;;
+  list) ls -1t "$MOVES"/*.json 2>/dev/null | while read -r f; do printf '%s  %s %s → %s  %s\n' "$(basename "$f" .json)" "$(jq -r .src.target "$f")" "$(jq -r .src.machine "$f")" "$(jq -r .dst.machine "$f")" "$(jq -r 'if .rolled_back then "rolled back" elif .done then "done" else "incomplete" end' "$f")"; done; exit 0 ;;
+  show) S="$MOVES/$2.json"; [ -f "$S" ] || die "no move $2"; jq . "$S"; exit 0 ;;
+  --resume) S="$MOVES/$2.json"; [ -f "$S" ] || die "no move $2"; [ "$ME" = mac ] || die "run the orchestrator from the Mac"; orchestrate; exit $? ;;
+  --rollback) S="$MOVES/$2.json"; [ -f "$S" ] || die "no move $2"; [ "$ME" = mac ] || die "run the orchestrator from the Mac"; rollback; exit $? ;;
+  ""|-h|--help) sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'; exit 1 ;;
+esac
+
+[ "$ME" = mac ] || die "v1: run move from the Mac (it orchestrates both machines over ssh)"
+TARGET="$1"; DIRECTION="${2:-}"; shift 2 2>/dev/null || die "usage: move <tmux-target> to-server|to-mac [...]"
+MODE=cut; WIP=commit; DRY=false; FORCE=false
+while [ $# -gt 0 ]; do case "$1" in
+  --copy) MODE=copy;; --wip) WIP="$2"; shift;; --dry-run) DRY=true;; --force) FORCE=true;; *) die "unknown flag $1";; esac; shift; done
+case "$DIRECTION" in to-server) SRC=mac; DST=server;; to-mac) SRC=server; DST=mac;; *) die "direction must be to-server or to-mac";; esac
+[ "$WIP" = commit ] || [ "$WIP" = refuse ] || die "--wip commit|refuse"
+ID="$(date +%Y%m%d-%H%M%S)-$(printf '%s' "$TARGET" | tr -c 'A-Za-z0-9' '_')"
+S="$MOVES/$ID.json"
+jq -n --arg id "$ID" --arg t "$TARGET" --arg d "$DIRECTION" --arg src "$SRC" --arg dst "$DST" --arg mode "$MODE" --arg wip "$WIP" --argjson dry "$DRY" --arg n "$(nonce)" --arg n2 "$(nonce)" --arg ts "$(ts)" \
+  '{id:$id, started:$ts, direction:$d, nonce:$n, nonce2:$n2, opts:{mode:$mode, wip:$wip, dry:$dry}, src:{machine:$src, target:$t}, dst:{machine:$dst}, stages:{}}' > "$S"
+orchestrate

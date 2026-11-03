@@ -1,0 +1,7 @@
+[Unit]
+Description=Fleet A2A cross-machine relay — push outbound envelopes to peers over tailscale
+
+[Service]
+Type=oneshot
+ExecStart=/home/owner/kai/fleet-relay.sh
+TimeoutStartSec=90

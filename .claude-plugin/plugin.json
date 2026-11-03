@@ -1,0 +1,12 @@
+{
+  "name": "kushbot",
+  "description": "Per-session Telegram bot remote control. Pre-create a pool of bots in ~/.claude/channels/kushbots/slot{N}/, then attach one to a session mid-flight via the attach() MCP tool. Forked from claude-plugins-official/telegram@0.0.6.",
+  "version": "0.0.1",
+  "keywords": [
+    "telegram",
+    "messaging",
+    "channel",
+    "mcp",
+    "kushbot"
+  ]
+}

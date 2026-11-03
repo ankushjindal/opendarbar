@@ -1,0 +1,11 @@
+[Unit]
+Description=Run the usage sampler hourly (2 min past) and 3 min after boot
+
+[Timer]
+OnBootSec=3min
+OnCalendar=*-*-* *:02:00
+Persistent=false
+AccuracySec=30s
+
+[Install]
+WantedBy=timers.target

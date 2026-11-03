@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.kushdarbar.fleet-ensure</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>/Users/owner/.claude/plugins/local/kushbot/fleet/macctl</string>
+    <string>ensure</string>
+  </array>
+  <!-- Mac watchdog for STANDING fleet agents: every 2 min, relaunch any
+       non-parked agent whose tmux is gone (crash + reboot heal). Honors
+       maint-<name> flags and parked, same semantics as server's watchdog. -->
+  <key>StartInterval</key><integer>120</integer>
+  <key>RunAtLoad</key><true/>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key><string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:/Users/owner/.bun/bin:/Users/owner/.local/bin</string>
+    <key>HOME</key><string>/Users/owner</string>
+  </dict>
+  <key>StandardOutPath</key><string>/Users/owner/.claude/channels/fleet/logs/fleet-ensure.out.log</string>
+  <key>StandardErrorPath</key><string>/Users/owner/.claude/channels/fleet/logs/fleet-ensure.err.log</string>
+</dict>
+</plist>

@@ -1,0 +1,6 @@
+main { max-width: 720px; }
+.rl-save-h { font-size: 28px; font-weight: 600; margin: 96px 0 12px; }
+.rl-save-d { font-size: 17px; color: var(--text); margin: 0; overflow-wrap: anywhere; }
+.rl-save-tags { color: var(--text2); font-size: 15px; margin-left: 8px; }
+.rl-save-acts { margin-top: 40px; display: flex; flex-wrap: wrap; gap: 4px; }
+.rl-act { display: inline-flex; align-items: center; font: inherit; font-size: 15px; color: var(--text); padding: 0 18px 0 0; min-height: 44px; text-decoration: underline; text-decoration-thickness: 1px; text-underline-offset: 3px; }

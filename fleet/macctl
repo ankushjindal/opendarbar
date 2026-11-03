@@ -1,0 +1,427 @@
+#!/usr/bin/env bash
+# macctl — Mac-side lifecycle for STANDING fleet agents (the munshi pattern,
+# laptop edition). Registry-driven sibling of fleet-ctl: server keeps fleet-ctl
+# (systemd watchdog, oat auth); the Mac gets this + one launchd ensure-job.
+#
+#   macctl status                    # standing agents on this Mac
+#   macctl start <name> [--fresh]    # launch from registry spawn (resume default)
+#   macctl stop <name>               # tmux kill + park (the only correct kill)
+#   macctl park|unpark <name>
+#   macctl ensure                    # one watchdog pass over all agents (launchd
+#                                    #   runs this every 2 min — crash + reboot heal)
+#   macctl provision <name> --bot <botname>   # stamp a new agent HOME skeleton
+#
+# A "standing agent" here = registry entry with machine=="laptop" AND its own
+# home dir (home != $HOME). Pool slots (kc/kushN, shared ~/.claude) are NOT
+# managed by macctl — they live and die with their dc sessions by design.
+#
+# Rules inherited from fleet-ctl:
+#  - resume is the default; --fresh deliberately drops the conversation
+#  - never kill by pattern; tmux session names + explicit pids only
+#  - stop == kill + park, so `ensure` can tell intent from crash
+#  - maint flag (state/maint-<name>, epoch expiry) silences `ensure` during
+#    manual surgery; start sets it for the boot window and clears on verify-up
+set -uo pipefail
+
+REG="$HOME/.claude/channels/fleet/registry.json"
+STATE_DIR="$HOME/.claude/channels/fleet/state"
+LOG="$HOME/.claude/channels/fleet/logs/macctl.log"
+mkdir -p "$STATE_DIR" "$(dirname "$LOG")"
+log() { echo "$(date -u +%FT%TZ) $*" >> "$LOG"; }
+
+jreg() { jq -r --arg n "$1" ".agents[] | select(.name == \$n) | $2 // empty" "$REG"; }
+regset() { # name key jsonvalue
+  local tmp; tmp=$(mktemp)
+  jq --arg n "$1" --argjson v "$3" "(.agents[] | select(.name == \$n) | .$2) = \$v" "$REG" > "$tmp" && mv "$tmp" "$REG"
+}
+standing_names() {
+  # standing = own-HOME agents (home != $HOME) OR shared-HOME slot-bound agents
+  # (a `.slot` field). The latter share ~/.claude (kc's keychain auth) but are
+  # still watchdog-managed standing personas — e.g. reddit-hunter on slot4.
+  jq -r --arg h "$HOME" \
+    '.agents[] | select(.machine == "laptop" and .spawn != null and ((.home != null and .home != $h) or (.slot != null))) | .name' "$REG"
+}
+
+# newest session id in a HOME's project dirs (for resume)
+capture_session() { # $1=home
+  local f
+  f=$(ls -t "$1/.claude/projects"/*/*.jsonl 2>/dev/null | head -1) || true
+  [ -n "${f:-}" ] && basename "$f" .jsonl || true
+}
+
+claude_pid_for_home() { # $1=home — claude proc whose HOME env matches
+  local p
+  for p in $(pgrep -x claude 2>/dev/null; pgrep -f '\.local/bin/claude' 2>/dev/null); do
+    if ps -E -o command= -p "$p" 2>/dev/null | tr ' ' '\n' | grep -qx "HOME=$1"; then
+      echo "$p"; return 0
+    fi
+  done
+  return 1
+}
+
+cmd_start() {
+  local name="$1" fresh="${2:-0}"
+  local home tmuxs spawn cwd kick
+  home=$(jreg "$name" '.home'); tmuxs=$(jreg "$name" '.tmux')
+  spawn=$(jreg "$name" '.spawn'); cwd=$(jreg "$name" '.cwd'); kick=$(jreg "$name" '.kick')
+  [ -z "$home" ] || [ -z "$spawn" ] && { echo "✗ '$name' has no home/spawn in registry"; return 1; }
+  tmuxs="${tmuxs:-$name}"; cwd="${cwd:-$home}"
+  local slot; slot=$(jreg "$name" '.slot')
+  # The session id baked into the registry spawn, put there by
+  # mac-account-switch.sh. It names THIS agent's conversation, which is more than
+  # capture_session can say on a shared HOME, so it wins whenever its transcript
+  # is still on disk.
+  local regsid=""
+  if [ "$fresh" -eq 0 ]; then
+    regsid=$(printf '%s' "$spawn" | sed -nE 's/.*(-r|--resume) ([0-9a-f-]{36}).*/\2/p' | head -1)
+    if [ -n "$regsid" ] && ! ls "$home/.claude/projects"/*/"$regsid.jsonl" >/dev/null 2>&1; then
+      log "start $name: registry sid $regsid has no transcript under $home, ignoring it"
+      regsid=""
+    fi
+    # shared-HOME slot agents can't resume-by-home (capture_session keys off $home
+    # = the shared ~/.claude, full of kc's + sons' sessions). With no recorded sid
+    # there is nothing trustworthy left to resume, so boot fresh as before.
+    [ -n "$slot" ] && [ -z "$regsid" ] && fresh=1
+  fi
+  if tmux has-session -t "$tmuxs" 2>/dev/null; then
+    echo "· $name already running (tmux $tmuxs)"; return 0
+  fi
+
+  # maint guard for the boot window (ensure must not double-launch a slow boot)
+  local maint="$STATE_DIR/maint-$name"
+  echo $(( $(date +%s) + 180 )) > "$maint"
+
+  # Account: registry .acct is what a dashboard/kushbot switch recorded. Inject
+  # that token here so an `ensure` heal brings the agent back on the SAME account
+  # instead of silently reverting it to the ambient login. The token is cat-ed
+  # inside the spawned shell, never in this script's argv, output or log — and
+  # any account env already in the spawn line is stripped first, because in a
+  # command prefix the LAST assignment wins and a stale one would beat ours.
+  local relaunch="$spawn" acct acctenv="" sq="'"
+  acct=$(jreg "$name" '.acct')
+  relaunch=$(echo "$relaunch" \
+    | sed -E "s/CLAUDE_CODE_OAUTH_TOKEN=\"\\\$\\(cat ${sq}[^${sq}]*${sq}\\)\" *//g" \
+    | sed -E 's/CLAUDE_CODE_OAUTH_TOKEN=[^ ]+ *//g' \
+    | sed -E 's/CLAUDE_ACCT_LABEL=[^ ]+ *//g')
+  if [ -n "$acct" ]; then
+    local tokf="$HOME/.config/claude-accounts/$acct"
+    if [ -s "$tokf" ]; then
+      acctenv="CLAUDE_ACCT_LABEL=$acct CLAUDE_CODE_OAUTH_TOKEN=\"\$(cat '$tokf')\" "
+    else
+      echo "⚠️ $name: registry acct '$acct' has no token at $tokf — launching on the ambient login"
+      log "start $name: acct=$acct but no token at $tokf"
+    fi
+  fi
+
+  relaunch=$(echo "$relaunch" | sed -E 's/ -r [^ ]+//; s/ --resume [^ ]+//')
+  local session=""
+  if [ "$fresh" -eq 0 ]; then
+    session="${regsid:-$(capture_session "$home")}"
+    # -r must precede the variadic --dangerously-load-development-channels flag
+    [ -n "$session" ] && relaunch="${relaunch/--dangerously-skip-permissions/--dangerously-skip-permissions -r $session}"
+  fi
+
+  tmux new-session -d -s "$tmuxs" -c "$cwd" "$acctenv$relaunch"
+  log "start $name fresh=$fresh tmux=$tmuxs acct=${acct:-none} session=${session:-fresh}${regsid:+ (from registry)}"
+
+  # boot-prompt auto-dismissal (trust folder / dev-channels / resume picker) —
+  # match on FLATTENED pane text so wrapping can't hide a prompt (fleet-ctl lesson)
+  local waited=0 pane paneflat
+  while [ $waited -lt 45 ]; do
+    sleep 3; waited=$((waited+3))
+    pane=$(tmux capture-pane -t "$tmuxs" -p -S -40 2>/dev/null || true)
+    paneflat=$(echo "$pane" | tr '\n' ' ')
+    if echo "$paneflat" | grep -q "bypass permissions on"; then break
+    elif echo "$paneflat" | grep -q "WARNING: Claude Code running in Bypass Permissions"; then
+      # ⚠️ this dialog DEFAULTS TO "1. No, exit" — a blind Enter KILLS claude
+      # (killed reddit-hunter's first boot, 2026-07-16). Select "2. Yes" first.
+      tmux send-keys -t "$tmuxs" 2; sleep 1; tmux send-keys -t "$tmuxs" Enter
+    elif echo "$paneflat" | grep -qE "Is this a project you created|Loading development channels|I am using this for local development|Please use --channels|Resume from summary|Press Enter to continue|Security notes"; then
+      tmux send-keys -t "$tmuxs" Enter
+    fi
+  done
+
+  # verify-up: live bot claim (claim pid = the MCP child; it lives and dies
+  # with claude, and claim_file_for handles kc's slot0 vs standing HOME paths)
+  local ok=0 i cpid cf; cf=$(claim_file_for "$name")
+  for i in 1 2 3 4 5 6; do
+    sleep 4
+    cpid=$(cat "$cf" 2>/dev/null || true)
+    if [ -n "$cpid" ] && kill -0 "$cpid" 2>/dev/null; then ok=1; break; fi
+  done
+  if [ $ok -eq 0 ]; then
+    echo "⚠️ $name relaunched but did NOT verify up — check: tmux attach -t $tmuxs (maybe /login needed)"
+    log "start $name FAILED verify-up"
+    return 2   # maint flag left in place; expires in 180s
+  fi
+  rm -f "$maint"
+  regset "$name" parked 'false'
+  # optional kickoff line (registry .kick) — only on a genuinely new boot
+  if [ -n "$kick" ]; then
+    tmux send-keys -t "$tmuxs" "$kick"; sleep 1; tmux send-keys -t "$tmuxs" Enter
+  fi
+  echo "✅ $name up (tmux $tmuxs)"
+}
+
+# the bot-claim file differs by agent kind: kc = pool slot0; standing = its HOME
+claim_file_for() { # $1=name
+  if [ "$1" = "kc" ]; then echo "$HOME/.claude/channels/kushbots/slot0/claimed_by.pid"; return; fi
+  # slot-bound (shared-HOME) agents claim under kushbots/slot<N>/; own-HOME agents
+  # under their home's channels/telegram/.
+  local slot; slot="$(jreg "$1" '.slot')"
+  if [ -n "$slot" ]; then echo "$HOME/.claude/channels/kushbots/slot${slot}/claimed_by.pid"
+  else echo "$(jreg "$1" '.home')/.claude/channels/telegram/claimed_by.pid"; fi
+}
+
+# kill the agent's tmux + reap survivors. Harvests the pane's claude pid BEFORE
+# the kill (claude reparents to init on Mac tmux kills — home-matching can't
+# identify kc's claude since kc shares $HOME).
+kill_agent_procs() { # $1=name
+  local name="$1" tmuxs; tmuxs=$(jreg "$name" '.tmux'); tmuxs="${tmuxs:-$name}"
+  local panepid cps=""
+  if tmux has-session -t "$tmuxs" 2>/dev/null; then
+    panepid=$(tmux list-panes -t "$tmuxs" -F '#{pane_pid}' 2>/dev/null | head -1)
+    [ -n "$panepid" ] && cps=$(pgrep -P "$panepid" 2>/dev/null | tr '\n' ' ')
+    tmux kill-session -t "$tmuxs"; echo "✓ killed tmux $tmuxs"
+  else
+    echo "· no tmux $tmuxs"
+  fi
+  sleep 1
+  local p
+  for p in $cps; do kill -0 "$p" 2>/dev/null && kill "$p" 2>/dev/null && echo "✓ reaped surviving proc $p"; done
+  local cpid; cpid=$(cat "$(claim_file_for "$name")" 2>/dev/null || true)
+  if [ -n "$cpid" ] && kill -0 "$cpid" 2>/dev/null; then
+    kill "$cpid" 2>/dev/null && echo "✓ reaped surviving poller $cpid"
+  fi
+}
+
+cmd_stop() {
+  local name="$1"
+  [ "$name" = "kc" ] && { echo "✗ refusing to STOP kc (the parent) — use restart"; return 1; }
+  regset "$name" parked 'true'   # park FIRST so ensure can't resurrect mid-kill
+  kill_agent_procs "$name"
+  log "stop $name (parked)"
+  echo "✓ $name parked (unpark + start to revive)"
+}
+
+# restart = kill + relaunch resuming the same session. Works for kc too (that's
+# the dashboard's "restart kush when it doesn't respond" button). The maint flag
+# inside cmd_start guards the boot window from `ensure`.
+cmd_restart() {
+  local name="$1"
+  kill_agent_procs "$name"
+  sleep 1
+  cmd_start "$name" 0
+}
+
+cmd_status() {
+  printf "%-16s %-6s %-8s %-10s %s\n" AGENT TMUX PARKED CLAIM HOME
+  local n tmuxs parked home cpid alive
+  for n in $(standing_names); do
+    tmuxs=$(jreg "$n" '.tmux'); tmuxs="${tmuxs:-$n}"
+    parked=$(jreg "$n" '.parked'); home=$(jreg "$n" '.home')
+    tmux has-session -t "$tmuxs" 2>/dev/null && t="✓" || t="✗"
+    cpid=$(cat "$home/.claude/channels/telegram/claimed_by.pid" 2>/dev/null || true)
+    alive="—"; [ -n "$cpid" ] && { kill -0 "$cpid" 2>/dev/null && alive="$cpid" || alive="stale"; }
+    printf "%-16s %-6s %-8s %-10s %s\n" "$n" "$t" "${parked:-false}" "$alive" "$home"
+  done
+}
+
+# status --json — same shape as server's `fleet-ctl status --json` (FleetStatus),
+# so the dashboard renders both machines with one page module. Covers: kc (parent),
+# standing agents (registry, own HOME), pool slots 1-3. Model/ctx come from the
+# statusline cache (/tmp/.claude_status_<sid>.json), same source as /status.
+cmd_status_json() {
+  python3 - "$REG" "$HOME" "$STATE_DIR" <<'PYEOF'
+import json, os, sys, glob, subprocess, time
+REG, HOME, STATE = sys.argv[1], sys.argv[2], sys.argv[3]
+def sh(cmd):
+    try: return subprocess.run(cmd, capture_output=True, text=True, timeout=5)
+    except Exception: return None
+def tmux_alive(name):
+    r = sh(["tmux", "has-session", "-t", name]); return bool(r and r.returncode == 0)
+def pid_alive(pid):
+    try: os.kill(int(pid), 0); return True
+    except Exception: return False
+def newest_session(projdir):
+    fs = glob.glob(os.path.join(projdir, "*", "*.jsonl"))
+    if not fs: return None
+    return os.path.basename(max(fs, key=os.path.getmtime))[:-6]
+def cache_for(sid):
+    try: return json.load(open(f"/tmp/.claude_status_{sid}.json"))
+    except Exception: return {}
+def read_claim(path):
+    try: return open(path).read().strip()
+    except Exception: return ""
+def agent_row(name, home, tmux, parked, kind, claim_file):
+    sid = newest_session(os.path.join(home, ".claude", "projects")) or ""
+    c = cache_for(sid) if sid else {}
+    claim_pid = read_claim(claim_file)
+    claim = "ok" if (claim_pid and pid_alive(claim_pid)) else ("stale" if claim_pid else "")
+    up = tmux_alive(tmux) if tmux else False
+    return {
+        "name": name, "up": up, "tmux": up, "claudePid": "", "bunPid": "",
+        "claim": claim, "parked": bool(parked), "lease": kind,
+        "model": c.get("model") or "", "ctx": c.get("ctx_pct"),
+        "fiveH": c.get("five_hour_pct") if isinstance(c.get("five_hour_pct"), (int, float)) else None,
+        "session": sid, "outbox": 0, "kind": kind,
+    }
+reg = json.load(open(REG))
+agents = []
+for a in reg.get("agents", []):
+    if a.get("machine") != "laptop": continue
+    name = a.get("name", "")
+    if name == "kc":
+        agents.append(agent_row("kc", HOME, a.get("tmux") or "kc", False, "parent",
+                                os.path.join(HOME, ".claude/channels/kushbots/slot0/claimed_by.pid")))
+    elif a.get("home") and a["home"] != HOME and a.get("spawn"):
+        agents.append(agent_row(name, a["home"], a.get("tmux") or name, a.get("parked", False), "standing",
+                                os.path.join(a["home"], ".claude/channels/telegram/claimed_by.pid")))
+# pool slots 1-3 (ad-hoc sons; claim tells the story, tmux only if kushN exists)
+for n in (1, 2, 3):
+    cf = os.path.join(HOME, f".claude/channels/kushbots/slot{n}/claimed_by.pid")
+    claim_pid = read_claim(cf)
+    live = bool(claim_pid and pid_alive(claim_pid))
+    tmux = ""
+    for cand in (f"kush{n}", f"kush-slot{n}", f"codex-slot{n}"):
+        if tmux_alive(cand): tmux = cand; break
+    agents.append({
+        "name": f"slot{n}", "up": live, "tmux": bool(tmux), "claudePid": "", "bunPid": "",
+        "claim": "ok" if live else ("stale" if claim_pid else ""), "parked": False,
+        "lease": ("codex" if tmux.startswith("codex") else "pool"),
+        "model": "", "ctx": None, "fiveH": None, "session": "", "outbox": 0,
+        "kind": "pool", "tmuxName": tmux,
+    })
+# watchdog = fleet-ensure launchd job heartbeat (macctl.log last ensure/start line)
+last = ""
+try:
+    logp = os.path.join(HOME, ".claude/channels/fleet/logs/macctl.log")
+    mt = os.path.getmtime(logp)
+    last = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(mt))
+except Exception: pass
+print(json.dumps({"ts": int(time.time()),
+                  "watchdog": {"lastCycle": last, "alerts6h": 0},
+                  "agents": agents}))
+PYEOF
+}
+
+# ping <name> — inject a probe turn via tmux send-keys and wait for the echo.
+# The dashboard's "is it actually responding?" button (darbar live-probe, scripted).
+cmd_ping() {
+  local name="$1" tmuxs
+  tmuxs=$(jreg "$name" '.tmux'); tmuxs="${tmuxs:-$name}"
+  tmux has-session -t "$tmuxs" 2>/dev/null || { echo "✗ $name has no tmux session ($tmuxs)"; return 1; }
+  local pane; pane=$(tmux capture-pane -t "$tmuxs" -p -S -5 2>/dev/null | tr '\n' ' ')
+  if echo "$pane" | grep -q "esc to interrupt"; then
+    echo "· $name is BUSY mid-turn — probe skipped (would inject into a live turn)"; return 3
+  fi
+  local nonce; nonce=$(head -c4 /dev/urandom | od -An -tx1 | tr -d ' \n')
+  tmux send-keys -t "$tmuxs" "fleet-ping: reply with exactly PING-$nonce and nothing else"
+  sleep 1; tmux send-keys -t "$tmuxs" Enter
+  local waited=0
+  while [ $waited -lt 45 ]; do
+    sleep 3; waited=$((waited+3))
+    if tmux capture-pane -t "$tmuxs" -p -S -15 2>/dev/null | grep -q "PING-$nonce" ; then
+      # the echo alone is the send; look for it OUTSIDE the prompt line (a reply)
+      if tmux capture-pane -t "$tmuxs" -p -S -15 2>/dev/null | grep -v "fleet-ping:" | grep -q "PING-$nonce"; then
+        echo "✅ $name responded in ~${waited}s"; return 0
+      fi
+    fi
+  done
+  echo "✗ $name did NOT respond in 45s — wedged or auth-dead (try restart)"
+  return 2
+}
+
+cmd_ensure() {
+  # One watchdog pass — launchd runs this every 2 min. Heals crashes AND reboots.
+  local n tmuxs parked maint
+  for n in $(standing_names); do
+    parked=$(jreg "$n" '.parked'); [ "$parked" = "true" ] && continue
+    maint="$STATE_DIR/maint-$n"
+    if [ -f "$maint" ]; then
+      if [ "$(cat "$maint" 2>/dev/null || echo 0)" -gt "$(date +%s)" ]; then continue; fi
+      rm -f "$maint"   # expired
+    fi
+    tmuxs=$(jreg "$n" '.tmux'); tmuxs="${tmuxs:-$n}"
+    if ! tmux has-session -t "$tmuxs" 2>/dev/null; then
+      log "ensure: $n down — relaunching"
+      cmd_start "$n" 0 || log "ensure: $n relaunch FAILED"
+    fi
+  done
+}
+
+cmd_provision() {
+  # Stamp a new standing-agent HOME skeleton. Token/access/registry-spawn are
+  # then filled in by the operator (deliberately: secrets never flow through argv).
+  local name="$1" bot="$2"
+  local home="$HOME/${name}-home"
+  [ -d "$home" ] && { echo "✗ $home already exists"; return 1; }
+  mkdir -p "$home/.claude/channels/telegram" "$home/.claude/plugins/local"
+  # plugin copy — own install, exclude repo .git + node_modules (bun install at
+  # boot) + dashboard/ (the fleet dashboard lives in this repo but runs ONCE per
+  # machine from the parent checkout, never from agent HOME copies)
+  rsync -a --exclude .git --exclude node_modules --exclude dashboard \
+    "$HOME/.claude/plugins/local/kushbot/" "$home/.claude/plugins/local/kushbot/"
+  # minimal MCP registration pointing at the agent's own plugin copy
+  cat > "$home/.claude.json" <<EOF
+{
+  "mcpServers": {
+    "kushbot": {
+      "type": "stdio",
+      "command": "bun",
+      "args": ["run", "--cwd", "$home/.claude/plugins/local/kushbot", "--shell=bun", "--silent", "start"],
+      "env": {}
+    }
+  }
+}
+EOF
+  # single-mode slot binding
+  cat > "$home/.claude/channels/kushbot.json" <<EOF
+{
+  "machine": "laptop",
+  "mode": "single",
+  "bot": "$bot",
+  "channelsDir": "channels/telegram",
+  "fleetRoot": "$HOME/.claude/channels/fleet"
+}
+EOF
+  chmod 600 "$home/.claude/channels/kushbot.json"
+  # access template (operator fills allowFrom/groups; .env gets the bot token)
+  cat > "$home/.claude/channels/telegram/access.json" <<'EOF'
+{ "dmPolicy": "allowlist", "allowFrom": [], "groups": {}, "pending": {} }
+EOF
+  chmod 600 "$home/.claude/channels/telegram/access.json"
+  # statusline — REQUIRED for kushbot's /status (it reads the cache the
+  # statusline script writes to /tmp/.claude_status_<sid>.json; without this,
+  # model/ctx/limits render as "—" — reddit-hunter lesson, 2026-07-16).
+  # Shared script by absolute path, same pattern as server's homes.
+  cat > "$home/.claude/settings.json" <<EOF
+{
+  "statusLine": {
+    "type": "command",
+    "command": "zsh $HOME/.claude/statusline.zsh"
+  }
+}
+EOF
+  echo "✓ provisioned $home"
+  echo "  next: (1) write channels/telegram/.env (TELEGRAM_BOT_TOKEN=..., chmod 600)"
+  echo "        (2) fill access.json allowFrom / groups"
+  echo "        (3) registry agents[] entry: name/machine=laptop/home/tmux/spawn/cwd/kick"
+  echo "        (4) macctl start $name  → then /login once inside tmux"
+}
+
+case "${1:-}" in
+  status)    if [ "${2:-}" = "--json" ]; then cmd_status_json; else cmd_status; fi ;;
+  ping)      cmd_ping "$2" ;;
+  start)     shift; n="$1"; f=0; [ "${2:-}" = "--fresh" ] && f=1; cmd_start "$n" "$f" ;;
+  restart)   cmd_restart "$2" ;;
+  stop)      cmd_stop "$2" ;;
+  park)      regset "$2" parked 'true';  echo "✓ $2 parked" ;;
+  unpark)    regset "$2" parked 'false'; echo "✓ $2 unparked" ;;
+  ensure)    cmd_ensure ;;
+  provision) shift; name="$1"; shift
+             bot=""; while [ $# -gt 0 ]; do case "$1" in --bot) bot="$2"; shift 2;; *) shift;; esac; done
+             [ -z "$bot" ] && { echo "usage: macctl provision <name> --bot <botname>"; exit 2; }
+             cmd_provision "$name" "$bot" ;;
+  *) echo "usage: macctl {status|start <n> [--fresh]|stop <n>|park <n>|unpark <n>|ensure|provision <n> --bot <bot>}"; exit 2 ;;
+esac

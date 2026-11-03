@@ -1,0 +1,19 @@
+{
+  "//": "Check-only. Bun runs the TS directly; nothing here emits. Exists so `bunx tsc --noEmit` can catch the one bug class `bun build` cannot: a moved block referencing an identifier that is no longer in scope (bun treats unknown identifiers as globals). Run it before every commit that moves code between files.",
+  "compilerOptions": {
+    "lib": ["ESNext"],
+    "target": "ESNext",
+    "module": "Preserve",
+    "moduleResolution": "bundler",
+    "moduleDetection": "force",
+    "allowImportingTsExtensions": true,
+    "verbatimModuleSyntax": true,
+    "noEmit": true,
+    "strict": true,
+    "skipLibCheck": true,
+    "allowJs": true,
+    "types": ["bun"]
+  },
+  "include": ["server.ts", "broker.ts", "src/**/*.ts"],
+  "exclude": ["node_modules", "codex-bridge"]
+}

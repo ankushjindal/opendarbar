@@ -1,0 +1,10 @@
+[Unit]
+Description=Darbar Reading podcast sync, daily from 12:00 IST, hourly retries until 18:00 IST
+
+[Timer]
+# 06:30..12:30 UTC = 12:00..18:00 IST. podcast-sync --daily no-ops after the first success.
+OnCalendar=*-*-* 06..12:30:00
+Persistent=false
+
+[Install]
+WantedBy=timers.target

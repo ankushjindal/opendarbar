@@ -1,0 +1,60 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  ALTERNATIVE durability option to the tmux supervisor loop (codex-son).
+  RECOMMENDATION: prefer `codex-son start` (tmux loop) — it matches the kushbot
+  fleet's tmux ops model, gives attachable logs, and runs in a login session.
+
+  ⚠️ Mac launchd caveat (see ~/.claude MEMORY): pure-daemon launchd jobs have hit
+  a "must run session-attached" problem for the fleet (keychain / login-session
+  needs). codex spawns `codex app-server` which may need the login session for
+  auth (~/.codex). If you load this and codex can't auth, switch to the tmux loop.
+
+  This job is INTENTIONALLY LEFT UNLOADED. To use it (production step, not done
+  here): review, copy to ~/Library/LaunchAgents/, then `launchctl load` it.
+  Logs go to ~/Library/Logs (NOT under Downloads — another fleet launchd gotcha).
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.example.codex-son.slot3</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/owner/.bun/bin/bun</string>
+    <string>/Users/owner/.claude/plugins/local/kushbot/codex-bridge/bridge.ts</string>
+    <string>--slot</string>
+    <string>3</string>
+    <string>--persona</string>
+    <string>/Users/owner/.codex/kush3/AGENTS.md</string>
+    <string>--cwd</string>
+    <string>/Users/owner</string>
+    <string>--home</string>
+    <string>/Users/owner</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>/Users/owner/.claude/plugins/local/kushbot/codex-bridge</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>HOME</key>
+    <string>/Users/owner</string>
+    <key>PATH</key>
+    <string>/Users/owner/.bun/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
+
+  <!-- KeepAlive respawns on crash (launchd is the supervisor; no tmux loop needed
+       if you use this). ThrottleInterval avoids a hot respawn loop. -->
+  <key>KeepAlive</key>
+  <true/>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>ThrottleInterval</key>
+  <integer>5</integer>
+
+  <key>StandardOutPath</key>
+  <string>/Users/owner/Library/Logs/codex-son-slot3.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/owner/Library/Logs/codex-son-slot3.log</string>
+</dict>
+</plist>

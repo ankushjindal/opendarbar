@@ -1,0 +1,9 @@
+node_modules/
+logs/
+data/recents.json
+data/*.cache.json
+.env
+.env.local
+.DS_Store
+*.log
+.claude/

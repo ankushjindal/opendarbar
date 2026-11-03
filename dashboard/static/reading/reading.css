@@ -1,0 +1,83 @@
+/* A phone lets you pan a page that is one pixel too wide, and then every tap
+   lands slightly off. Nothing here is allowed to be wider than the screen.
+   `clip` rather than `hidden` wherever the browser knows the word: hidden on
+   one axis makes the other axis compute to auto, which makes <body> a scroll
+   container, and a scroll container is what position:sticky resolves against —
+   so every sticky box on these pages was sticking to a box that never scrolls.
+   clip cuts the same overflow without making a scroller. */
+html, body { overflow-x: hidden; max-width: 100vw; }
+@supports (overflow-x: clip) { html, body { overflow-x: clip; } }
+body { background: var(--bg); color: var(--text); -webkit-font-smoothing: antialiased; }
+/* flex and grid children default to min-width:auto, which refuses to shrink
+   below their content and is what pushes a row off the edge */
+.rl-top > *, .rl-top-right > *, .rl-controls > *, .rl-bar-main > *, .rl-item > *, .rl-cue > * { min-width: 0; }
+* { transition: none; }
+/* the dashboard's eight-link nav does not belong on a reading surface */
+.top-nav { display: none; }
+main { padding: 0 20px 24px; max-width: 720px; margin: 0 auto; }
+a { color: var(--text); }
+
+/* Header: the stephango line. Identity, then where you are, then the controls. */
+.rl-top { display: flex; align-items: center; gap: 10px; min-height: 44px; margin-top: 18px; font-size: 15px; }
+.rl-crumb { color: var(--text); text-decoration: none; }
+.rl-crumb:hover { text-decoration: underline; text-decoration-thickness: 1px; text-underline-offset: 3px; }
+.rl-sep { color: var(--text3); }
+.rl-here { color: var(--text2); }
+.rl-top-right { margin-left: auto; display: flex; align-items: center; gap: 16px; }
+/* A "+" glyph sits high in its em box in every system font, which reads as a
+   misaligned header however exactly the boxes line up. Drawn instead. */
+.rl-add-toggle {
+  flex: none; width: 44px; height: 44px; padding: 0; background: none; border: 0;
+  color: var(--text2); cursor: pointer; display: flex; align-items: center; justify-content: center;
+}
+.rl-add-toggle svg { display: block; }
+.rl-add-toggle:hover { color: var(--accent); }
+
+/* Theme switch: a hairline pill whose knob is the glyph. */
+.rl-theme {
+  flex: none; width: 48px; height: 26px; border: 1px solid var(--border); border-radius: 13px;
+  background: none; padding: 0; cursor: pointer; position: relative; flex: none;
+}
+.rl-theme-knob {
+  position: absolute; top: 2px; left: 2px; width: 20px; height: 20px;
+  display: flex; align-items: center; justify-content: center;
+  color: var(--text2); transition: transform 150ms ease;
+}
+:root[data-theme="dark"] .rl-theme-knob { transform: translateX(22px); }
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) .rl-theme-knob { transform: translateX(22px); } }
+.rl-theme-knob svg { display: block; }
+.rl-theme .rl-moon { display: none; }
+:root[data-theme="dark"] .rl-theme .rl-moon { display: block; }
+:root[data-theme="dark"] .rl-theme .rl-sun { display: none; }
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) .rl-theme .rl-moon { display: block; }
+  :root:not([data-theme="light"]) .rl-theme .rl-sun { display: none; }
+}
+@media (prefers-reduced-motion: reduce) { .rl-theme-knob { transition: none; } }
+
+/* Shortcuts overlay */
+.rl-keys {
+  display: none; position: fixed; inset: 0; z-index: 20; background: rgba(0,0,0,0.35);
+  align-items: center; justify-content: center; padding: 20px;
+}
+.rl-keys.on { display: flex; }
+.rl-keys-sheet {
+  background: var(--bg); border: 1px solid var(--border); max-width: 640px; width: 100%;
+  max-height: 80vh; overflow: auto; padding: 24px;
+}
+.rl-keys-cols { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; }
+.rl-keys h3 { font-size: 12px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: var(--text2); margin: 0 0 10px; }
+.rl-keys dl { margin: 0 0 20px; font-size: 14px; }
+.rl-keys dt { float: left; clear: left; width: 84px; color: var(--text2); font-variant-numeric: tabular-nums; }
+.rl-keys dd { margin: 0 0 4px 90px; }
+.rl-keys .rl-keys-note { font-size: 13px; color: var(--text2); margin: 4px 0 0; }
+.rl-keys .rl-keys-cols + .rl-keys-note { margin: 0 0 20px; }
+@media (max-width: 640px) { .rl-keys-cols { grid-template-columns: 1fr; } }
+
+/* What the network has to say, under the header on both pages. One muted line
+   in the same voice as a byline: it is a fact about the page, not an alarm,
+   and it is absent whenever everything is ordinary. */
+.rl-net { font-size: 13px; color: var(--text2); margin: 10px 0 0; line-height: 1.45; }
+.rl-net[hidden] { display: none; }
+.rl-net-act { cursor: pointer; }
+.rl-net-act:hover { color: var(--text); }

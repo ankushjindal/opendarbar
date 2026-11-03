@@ -1,0 +1,9 @@
+[Unit]
+Description=Quota alert - warn when a weekly AI budget is about to expire unspent
+OnFailure=kushdarbar-quota-alert-failed.service
+
+[Service]
+Type=oneshot
+Environment=PATH=/home/owner/.local/bin:/home/owner/.bun/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+ExecStart=/home/owner/kai/quota-alert.sh
+TimeoutStartSec=180

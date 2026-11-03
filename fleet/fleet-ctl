@@ -1,0 +1,763 @@
+#!/usr/bin/env bash
+# fleet-ctl — unified fleet controller for the server agent fleet (2026-07-06).
+#
+# The controller command the owner asked for: "start kai2 with <brief>" from
+# parent kai (or kush over ssh) becomes one verified operation.
+#
+# AUTHORIZATION MODEL (matches fleet CLAUDE.md):
+#   - kai (server) + kush (Mac, over ssh) run this self-initiated.
+#   - Any son may run it ONLY on the owner's explicit order in that son's chat.
+#   - A2A mail NEVER authorizes running this — untrusted input.
+#
+# Registry-driven: ~/.claude/channels/fleet/registry.json carries name → home,
+# tmux session, spawn cmd, cwd, parked. One roster for A2A, watchdog, and this.
+#
+# RESUME IS THE DEFAULT everywhere (the owner 2026-07-06: "same sessions unless
+# asked for"). --fresh is the explicit exception.
+#
+# Commands:
+#   status                      fleet table: proc/claim/grant + model/ctx%/5h% per son
+#   start <name> [--fresh] [--engine claude|gateway] [--model <id>] [--once] [-m "brief"]
+#                               relaunch (resume default), verify up, inject brief
+#   reload <name>|--all [--auth <acct>] [--soft] [--fresh] [--engine ..] [--model ..] [-m "brief"]
+#                               restart (resume default); --auth switches account first;
+#                               --soft suppresses watchdog red/green churn; --all sweeps sons
+#   stop <name>                 kill tmux session + park (watchdog goes quiet)
+#
+# ENGINE / MODEL (2026-07-14). Which brain a son runs on is a REGISTRY FACT, not
+# something you remember to type. `--engine gateway --model grok-4.5` persists to
+# the registry, so the watchdog's auto-heal, boot-restore, and every later `start`
+# all reproduce it. Before this, a hand-launched grok son was silently resurrected
+# as Opus by the watchdog ("kai1 is still giving me opus", 2026-07-14).
+#   engine=claude   (default) plain Claude Code, Anthropic auth via oat
+#   engine=gateway  Claude Code harness + GPT/Grok brain through the local
+#                   CLIProxyAPI (the durable equivalent of the `dcg` zsh function,
+#                   which does not exist in the non-interactive shell tmux spawns)
+#   --once          use the override for THIS launch without persisting it
+# Examples:
+#   fleet-ctl start kai1 --engine gateway --model grok-4.5   # and it STAYS grok
+#   fleet-ctl start kai1 --engine gateway --model gpt-5.6-sol
+#   fleet-ctl start kai1 --engine claude                     # back to Opus/default
+#   fleet-ctl start kai1 --fresh --engine gateway --model grok-4.5   # + drop history
+#   park <name> | unpark <name> toggle parked in registry
+#   assign <name> "brief"       inject a brief into a RUNNING son's session
+#   lease <name> "task"         record current task in registry (shown in status)
+#   repair [--force]            stale claims, creds re-link, orphan report (kill w/ --force)
+#   boot-restore                start every non-parked son missing from tmux (systemd boot unit)
+set -uo pipefail
+
+B=/home/owner
+REG=$B/.claude/channels/fleet/registry.json
+FLEETROOT=$B/.claude/channels/fleet
+STATE_DIR=$B/kai/state           # shared with fleet-watchdog (maint-<name> flags)
+LOG=$B/kai/logs/fleet-ctl.log
+mkdir -p "$(dirname "$LOG")" "$STATE_DIR"
+log() { echo "$(date -u +%FT%TZ) $*" >> "$LOG"; }
+
+jreg() { jq -r --arg n "$1" ".agents[] | select(.name == \$n) | $2 // empty" "$REG"; }
+regset() { # name key jsonvalue
+  local tmp; tmp=$(mktemp)
+  jq --arg n "$1" --argjson v "$3" "(.agents[] | select(.name == \$n) | .$2) = \$v" "$REG" > "$tmp" && mv "$tmp" "$REG"
+}
+
+die() { echo "fleet-ctl: $*" >&2; exit 1; }
+
+# The bot's NAME is the status indicator (the owner 2026-07-14: stop pushing me
+# lifecycle messages; put a red mark on the bot instead). A killed process cannot
+# rename itself — tmux kill-session gives it no chance — so the rename belongs to
+# whoever owns the INTENT. fleet-ctl stop means "down"; fleet-ctl start means "up".
+# Best-effort: a failed rename must never fail a start/stop.
+DOWN_MARK="🔴 "
+set_bot_icon() { # name down|up
+  local nm="$1" want="$2" home tok cur base new
+  home=$(jreg "$nm" '.home'); [ -n "$home" ] || return 0
+  tok=$(grep -oP '^TELEGRAM_BOT_TOKEN=\K.*' "$home/.claude/channels/telegram/.env" 2>/dev/null) || return 0
+  [ -n "$tok" ] || return 0
+  cur=$(curl -sS -m 8 "https://api.telegram.org/bot${tok}/getMyName" 2>/dev/null | jq -r '.result.name // empty')
+  [ -n "$cur" ] || return 0
+  base="${cur#$DOWN_MARK}"
+  if [ "$want" = "down" ]; then new="${DOWN_MARK}${base}"; else new="$base"; fi
+  [ "$new" = "$cur" ] && return 0        # never spend a rate-limit slot on a no-op
+  curl -sS -m 8 "https://api.telegram.org/bot${tok}/setMyName" --data-urlencode "name=$new" >/dev/null 2>&1 || true
+}
+need_agent() {
+  [ -n "$(jreg "$1" '.name')" ] || die "unknown agent '$1' (see registry.json)"
+  [ "$(jreg "$1" '.machine')" = "server" ] || die "'$1' is not on this machine"
+}
+
+# freshest statusline cache for an agent name -> "model|ctx|5h"
+status_cache() {
+  local agent="$1" best="" best_ts=0 f ts
+  for f in /tmp/.claude_status_*.json; do
+    [ -f "$f" ] || continue
+    if [ "$(jq -r '.agent // ""' "$f" 2>/dev/null)" = "$agent" ]; then
+      ts=$(jq -r '.ts // 0' "$f" 2>/dev/null); ts=${ts%.*}
+      [ "${ts:-0}" -gt "$best_ts" ] 2>/dev/null && { best_ts=$ts; best=$f; }
+    fi
+  done
+  [ -z "$best" ] && { echo "—|—|—"; return; }
+  jq -r '[.model // "—", (if .ctx_pct != null then (.ctx_pct|round|tostring)+"%" else "—" end), (if .five_h_pct != null then (.five_h_pct|round|tostring)+"%" else "—" end)] | join("|")' "$best" 2>/dev/null || echo "—|—|—"
+}
+
+# claude pid whose environ HOME == $1
+claude_pid_for_home() {
+  local home="$1" p h
+  for p in $(pgrep -f 'dangerously-load-development-channels' 2>/dev/null); do
+    h=$(tr '\0' '\n' </proc/$p/environ 2>/dev/null | grep -oP '^HOME=\K.*' || true)
+    if [ "$h" = "$home" ] || { [ "$home" = "$B" ] && [ -z "$h" ]; }; then echo "$p"; return; fi
+  done
+}
+bun_pid_for_home() {
+  local home="$1" p cwd
+  for p in $(pgrep -f 'plugins/local/kushbot' 2>/dev/null); do
+    cwd=$(readlink /proc/$p/cwd 2>/dev/null) || continue
+    [ "$cwd" = "$home/.claude/plugins/local/kushbot" ] && { echo "$p"; return; }
+  done
+}
+
+# newest session id in a home's projects tree (restart-sons capture logic)
+capture_session() {
+  local home="$1" newest
+  newest=$(find "$home/.claude/projects" -maxdepth 3 -name "*.jsonl" -type f -printf "%T@ %p\n" 2>/dev/null | sort -nr | head -1 | awk '{print $2}' || true)
+  [ -n "$newest" ] && basename "$newest" .jsonl
+}
+# cwd a session was created in — recorded inside every transcript entry. Claude
+# resolves `-r <id>` against the CWD's project, so resuming from the wrong dir
+# fails "No conversation found" (kai3 bug, 2026-07-06: registry cwd=/home but the
+# session lived under monorepo/code/ff-rn-app). Slug-decoding the project
+# dir is lossy (path-separators vs literal hyphens), so read the cwd field.
+session_cwd() {
+  local home="$1" sid="$2" f
+  f=$(find "$home/.claude/projects" -maxdepth 3 -name "$sid.jsonl" -type f 2>/dev/null | head -1)
+  [ -z "$f" ] && return
+  head -30 "$f" | jq -r 'select(.cwd) | .cwd' 2>/dev/null | head -1
+}
+
+# tmux inject: text and Enter as separate batches (paste-race fix, 2026-07-03)
+inject() { # session text
+  tmux send-keys -t "$1" "$2" 2>/dev/null || return 1
+  sleep 0.4
+  tmux send-keys -t "$1" Enter 2>/dev/null
+}
+
+# ALL top-level claude pids for a home (excludes subagents, which are
+# descendants of another claude proc and carry the same argv flag).
+toplevel_claudes_for_home() { # home
+  local home="$1" pids p h pid anc
+  pids=$(for p in $(pgrep -f 'dangerously-load-development-channels' 2>/dev/null); do
+    h=$(tr '\0' '\n' </proc/$p/environ 2>/dev/null | grep -oP '^HOME=\K.*' || true)
+    if [ "$h" = "$home" ] || { [ "$home" = "$B" ] && [ -z "$h" ]; }; then echo "$p"; fi
+  done)
+  for pid in $pids; do
+    anc=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
+    local skip=0
+    while [ -n "$anc" ] && [ "$anc" != "1" ] && [ "$anc" != "0" ]; do
+      if echo "$pids" | grep -qx "$anc"; then skip=1; break; fi
+      anc=$(ps -o ppid= -p "$anc" 2>/dev/null | tr -d ' ')
+    done
+    [ $skip -eq 0 ] && echo "$pid"
+  done
+}
+
+# Reap every top-level claude for a home, EXCEPT one living in tmux session $2.
+# WHY: kill-by-registry-name misses a twin living under a stale session name —
+# 2026-07-07 incident: original 'kai1-son' survived the Jul 6 sweep because the
+# registry said 'kai-son', leaving TWO claudes contending one bot slot (the
+# stray answered munshi's A2A via raw Bot API). Kill by HOME, not just by name.
+reap_home_strays() { # home [keep_session]
+  local home="$1" keep="${2:-}" pid sess reaped=""
+  for pid in $(toplevel_claudes_for_home "$home"); do
+    sess=$(tmux list-panes -a -F '#{session_name} #{pane_pid}' 2>/dev/null | awk -v p="$pid" '$2==p {print $1; exit}')
+    [ -n "$keep" ] && [ "$sess" = "$keep" ] && continue
+    if [ -n "$sess" ]; then
+      tmux kill-session -t "$sess" 2>/dev/null
+      log "reaped stray tmux session '$sess' (claude $pid, home $home)"
+      echo "  reaped stray session '$sess' (claude $pid)"
+    else
+      kill "$pid" 2>/dev/null
+      log "reaped stray claude $pid (home $home, not in tmux)"
+      echo "  reaped stray claude $pid (not in tmux)"
+    fi
+    reaped="$reaped $pid"
+  done
+  # Orphaned-bun sweep (no kept session): the home's claude(s) were just killed
+  # (tmux kill-session + the loop above), so any surviving bun kushbot child for
+  # this home is now orphaned. The 2026-07-07 zombie survived restarts for 3 days
+  # precisely because only claudes were reaped, never their bun children. Skipped
+  # when keeping a session (its bun child is legit).
+  if [ -z "$keep" ]; then
+    local bp
+    for bp in $(pgrep -f 'plugins/local/kushbot' 2>/dev/null); do
+      [ "$(readlink "/proc/$bp/cwd" 2>/dev/null)" = "$home/.claude/plugins/local/kushbot" ] || continue
+      kill "$bp" 2>/dev/null && { log "reaped orphan bun $bp (home $home)"; echo "  reaped orphan bun $bp"; }
+    done
+  fi
+  [ -z "$reaped" ] && return 0
+  # wait for the reaped pids to die so the relaunch never races a dying twin
+  local i p alive
+  for i in 1 2 3 4 5; do
+    alive=0
+    for p in $reaped; do kill -0 "$p" 2>/dev/null && alive=1; done
+    [ $alive -eq 0 ] && return 0
+    sleep 1
+  done
+  for p in $reaped; do kill -9 "$p" 2>/dev/null || true; done   # last resort
+  return 0
+}
+
+cmd_status() {
+  printf "%-9s %-4s %-6s %-4s %-6s %-14s %-5s %-4s %s\n" AGENT TMUX CLAUDE BUN CLAIM MODEL CTX 5H LEASE/STATE
+  local now; now=$(date +%s)
+  jq -r '.agents[] | select(.machine == "server") | .name' "$REG" | while read -r name; do
+    local home tmuxs parked lease claude bun claim mcx
+    home=$(jreg "$name" '.home'); tmuxs=$(jreg "$name" '.tmux')
+    parked=$(jreg "$name" '.parked'); lease=$(jreg "$name" '.lease')
+    # Codex-backed? A Codex son runs OUTSIDE fleet-ctl in tmux `codex-<name>`, so
+    # the registry (which tracks the Claude son) says parked while it's actually
+    # up. Detect that here so status doesn't lie. (2026-07-15)
+    if tmux has-session -t "codex-$name" 2>/dev/null; then
+      local cmodel cclaim ccpid
+      cmodel=$(grep -oE 'MODEL="[^"]+"' "$B/kai/codex-$name.sh" 2>/dev/null | head -1 | sed 's/^MODEL="//; s/"$//')
+      cclaim="—"; ccpid=$(cat "$home/.claude/channels/telegram/claimed_by.pid" 2>/dev/null || true)
+      [ -n "$ccpid" ] && { kill -0 "$ccpid" 2>/dev/null && cclaim="✓" || cclaim="STALE"; }
+      printf "%-9s %-4s %-6s %-4s %-6s %-14s %-5s %-4s %s\n" \
+        "$name" "✓" "codex" "—" "$cclaim" "${cmodel:-gpt-?}" "—" "—" "codex (codex-$name)"
+      continue
+    fi
+    if [ "$parked" = "true" ] && ! tmux has-session -t "$tmuxs" 2>/dev/null; then
+      printf "%-9s %s\n" "$name" "(parked)"
+      continue
+    fi
+    local t="✗"; tmux has-session -t "$tmuxs" 2>/dev/null && t="✓"
+    claude=$(claude_pid_for_home "$home"); bun=$(bun_pid_for_home "$home")
+    local c="✗"; [ -n "$claude" ] && c="✓"
+    local bn="✗"; [ -n "$bun" ] && bn="✓"
+    local cl="—" cpid
+    cpid=$(cat "$home/.claude/channels/telegram/claimed_by.pid" 2>/dev/null || true)
+    if [ -n "$cpid" ]; then kill -0 "$cpid" 2>/dev/null && cl="✓" || cl="STALE"; fi
+    # Primary: cache file is keyed by SESSION ID — derive it from the home's
+    # newest transcript (unambiguous even though kai1-4 all run agent "kai-son").
+    local sid; sid=$(capture_session "$home")
+    if [ -n "$sid" ] && [ -f "/tmp/.claude_status_${sid}.json" ]; then
+      mcx=$(jq -r '[.model // "—", (if .ctx_pct != null then (.ctx_pct|round|tostring)+"%" else "—" end), (if .five_h_pct != null then (.five_h_pct|round|tostring)+"%" else "—" end)] | join("|")' "/tmp/.claude_status_${sid}.json" 2>/dev/null || echo "—|—|—")
+    else
+      mcx=$(status_cache "$(basename "${home/#$B\//}" | sed 's/-home$//; s/^owner$/kai/')")
+    fi
+    printf "%-9s %-4s %-6s %-4s %-6s %-14s %-5s %-4s %s\n" \
+      "$name" "$t" "${c}${claude:+($claude)}" "$bn" "$cl" \
+      "$(echo "$mcx" | cut -d'|' -f1 | cut -c1-14)" "$(echo "$mcx" | cut -d'|' -f2)" "$(echo "$mcx" | cut -d'|' -f3)" \
+      "${lease:-—}"
+  done
+}
+
+# Machine-readable status for the dashboard (roadmap: fleet cockpit). Emits one
+# JSON object: {ts, agents:[...], watchdog:{...}}. Kept parallel to cmd_status.
+cmd_status_json() {
+  local now; now=$(date +%s)
+  local agents_json="[]"
+  for name in $(jq -r '.agents[] | select(.machine == "server") | .name' "$REG"); do
+    local home tmuxs parked lease claude bun cpid claim sid model ctx five up a2a
+    home=$(jreg "$name" '.home'); tmuxs=$(jreg "$name" '.tmux')
+    parked=$(jreg "$name" '.parked'); lease=$(jreg "$name" '.lease')
+    local tmux_ok=false; tmux has-session -t "$tmuxs" 2>/dev/null && tmux_ok=true
+    claude=$(claude_pid_for_home "$home"); bun=$(bun_pid_for_home "$home")
+    cpid=$(cat "$home/.claude/channels/telegram/claimed_by.pid" 2>/dev/null || true)
+    claim="none"; [ -n "$cpid" ] && { kill -0 "$cpid" 2>/dev/null && claim="ok" || claim="stale"; }
+    up=false; { [ "$tmux_ok" = true ] && [ -n "$claude" ] && [ -n "$bun" ]; } && up=true
+    sid=$(capture_session "$home"); model="—"; ctx=null; five=null
+    if [ -n "$sid" ] && [ -f "/tmp/.claude_status_${sid}.json" ]; then
+      model=$(jq -r '.model // "—"' "/tmp/.claude_status_${sid}.json" 2>/dev/null)
+      ctx=$(jq -r '.ctx_pct // null' "/tmp/.claude_status_${sid}.json" 2>/dev/null)
+      five=$(jq -r '.five_h_pct // null' "/tmp/.claude_status_${sid}.json" 2>/dev/null)
+    fi
+    # A2A outbox tail (last delivered/queued count)
+    local ob="$FLEETROOT/$name/outbox.jsonl" oc=0
+    [ -n "$FLEETROOT" ] && [ -f "$ob" ] && oc=$(wc -l < "$ob" 2>/dev/null || echo 0)
+    agents_json=$(jq -c --arg n "$name" --argjson up "$up" --argjson tmux "$tmux_ok" \
+      --arg claude "${claude:-}" --arg bun "${bun:-}" --arg claim "$claim" \
+      --argjson parked "${parked:-false}" --arg lease "${lease:-}" \
+      --arg model "$model" --argjson ctx "${ctx:-null}" --argjson five "${five:-null}" \
+      --arg sid "${sid:-}" --argjson outbox "${oc:-0}" \
+      '. + [{name:$n, up:$up, tmux:$tmux, claudePid:$claude, bunPid:$bun, claim:$claim, parked:$parked, lease:$lease, model:$model, ctx:$ctx, fiveH:$five, session:$sid, outbox:$outbox}]' <<< "$agents_json")
+  done
+  # watchdog: last cycle + recent alert count from its log
+  local wlog="$B/kai/logs/fleet-watchdog.log" wlast="" walerts=0
+  if [ -f "$wlog" ]; then
+    wlast=$(grep "cycle done" "$wlog" | tail -1 | awk '{print $1}')
+    walerts=$(awk -v cut="$(date -u -d '6 hours ago' +%FT%TZ)" '$1 > cut && /ALERT/' "$wlog" 2>/dev/null | wc -l)
+  fi
+  jq -cn --argjson agents "$agents_json" --arg wlast "$wlast" --argjson walerts "${walerts:-0}" \
+    --argjson ts "$now" '{ts:$ts, watchdog:{lastCycle:$wlast, alerts6h:$walerts}, agents:$agents}'
+}
+
+cmd_start() {
+  local name="$1"; shift
+  local fresh=0 brief="" engine="" model="" once=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --fresh) fresh=1 ;;
+      --engine) shift; engine="${1:-}" ;;
+      --model)  shift; model="${1:-}" ;;
+      --once)   once=1 ;;
+      -m|--brief) shift; brief="${1:-}" ;;
+      *) brief="$1" ;;
+    esac
+    shift
+  done
+  need_agent "$name"
+  local home tmuxs spawn cwd
+  home=$(jreg "$name" '.home'); tmuxs=$(jreg "$name" '.tmux')
+  spawn=$(jreg "$name" '.spawn'); cwd=$(jreg "$name" '.cwd')
+
+  # --- engine + model resolution (2026-07-14) --------------------------------
+  # The registry is the DECLARED INTENT, not just a launch string. Before this,
+  # the brain a son ran on lived nowhere on disk: you launched kai1 by hand with
+  # dcg + grok, the watchdog later auto-healed it via `fleet-ctl start kai1`,
+  # replayed the plain spawn string, and you got Opus back with no warning.
+  # (That is exactly the 2026-07-14 "kai1 is still giving me opus" incident.)
+  #
+  # Resolution order: CLI flag > registry field > default (claude, no model).
+  # A flag PERSISTS to the registry by default, so the watchdog, boot-restore and
+  # every future `start` reproduce the same brain. --once launches with the
+  # override but leaves the registry alone (ephemeral experiment).
+  local reg_engine reg_model
+  reg_engine=$(jreg "$name" '.engine'); reg_model=$(jreg "$name" '.model')
+  if [ -n "$engine" ] || [ -n "$model" ]; then
+    # An explicit --engine claude with no --model means "go back to plain Claude":
+    # drop the stale gateway model rather than silently carrying it over.
+    [ -z "$model" ] && [ "$engine" = "claude" ] && reg_model=""
+    if [ $once -eq 0 ]; then
+      regset "$name" engine "$(jq -n --arg v "${engine:-$reg_engine}" '$v')"
+      regset "$name" model  "$(jq -n --arg v "${model:-$reg_model}"  '$v')"
+      log "start $name persisted engine=${engine:-$reg_engine} model=${model:-$reg_model}"
+    fi
+  fi
+  [ -z "$engine" ] && engine="$reg_engine"
+  [ -z "$model"  ] && model="$reg_model"
+  [ -z "$engine" ] || [ "$engine" = "null" ] && engine="claude"
+  [ "$model" = "null" ] && model=""
+  case "$engine" in
+    claude|gateway) ;;
+    *) die "unknown engine '$engine' (want: claude | gateway)" ;;
+  esac
+
+  # No static spawn in the registry — capture the live cmdline before killing.
+  if [ -z "$spawn" ] || [ "$spawn" = "null" ]; then
+    local ppid
+    ppid=$(claude_pid_for_home "$home")
+    [ -z "$ppid" ] && die "$name has no spawn command in registry and no live process to capture — start it manually once"
+    spawn="HOME=$home $(ps -o args= -p "$ppid")"
+    # `ps` reports argv[0] as the user typed it — for a shell alias that is a BARE
+    # `claude`, not a path. tmux runs the relaunch in a NON-INTERACTIVE shell with no
+    # ~/.local/bin on PATH, so a bare `claude` dies instantly with "command not found":
+    # the old session is already killed, the new one never starts, and the agent is
+    # simply gone. That is how parent kai was lost on 2026-07-14 (and, quietly, at
+    # 05:52 the same morning). Resolve it to an absolute path before replaying.
+    local claude_bin
+    claude_bin=$(command -v claude 2>/dev/null || echo "$B/.local/bin/claude")
+    spawn=$(echo "$spawn" | sed -E "s#(^|[[:space:]])claude([[:space:]])#\1${claude_bin}\2#")
+    log "$name: captured live cmdline (no registry spawn); resolved binary to $claude_bin"
+  fi
+
+  # Session pinning: RESUME IS THE DEFAULT.
+  local session="" resume_cwd=""
+  if [ $fresh -eq 0 ]; then
+    session=$(capture_session "$home")
+    if [ -n "$session" ]; then
+      resume_cwd=$(session_cwd "$home" "$session")
+      # Resume MUST launch from the session's own project cwd or -r fails.
+      [ -n "$resume_cwd" ] && [ -d "$resume_cwd" ] && cwd="$resume_cwd"
+    fi
+  fi
+  local relaunch="$spawn"
+  # strip any stale -r from a captured cmdline, then splice ours
+  relaunch=$(echo "$relaunch" | sed -E 's/ -r [^ ]+//; s/ --resume [^ ]+//')
+  if [ -n "$session" ]; then
+    relaunch="${relaunch/--dangerously-skip-permissions/--dangerously-skip-permissions -r $session}"
+  fi
+  # Strip any --model the spawn string already carries; the resolved model below
+  # is the single source of truth (otherwise a persisted model would appear twice
+  # and the LAST flag would silently win).
+  relaunch=$(echo "$relaunch" | sed -E 's/ --model [^ ]+//')
+  [ -n "$model" ] && relaunch="$relaunch --model $model"
+
+  # Setup-token auth (2026-07-08, after the DURABLE oat-probe verdict): if the
+  # oat-active symlink exists, every launch carries CLAUDE_CODE_OAUTH_TOKEN
+  # read from it AT SPAWN TIME inside the tmux shell — the token never appears
+  # in the command string, ps args, or this script's logs. Env-var precedence
+  # beats .credentials.json, so this decouples the fleet from the shared
+  # rotating grant that kept dying overnight. Flip the whole fleet between
+  # accounts by repointing the symlink (reload --all --auth <acct> does both).
+  local oat="$B/.claude/creds-store/oat-active.txt"
+  # Per-session account switch (account-switch.sh): inject a SPECIFIC account's
+  # token for this one relaunch WITHOUT repointing the shared oat-active symlink
+  # (that symlink is fleet-wide). Falls back to oat-active when unset.
+  if [ -n "${FLEETCTL_OAT_OVERRIDE:-}" ] && [ -e "${FLEETCTL_OAT_OVERRIDE}" ]; then
+    oat="$FLEETCTL_OAT_OVERRIDE"
+  fi
+
+  if [ "$engine" = "gateway" ]; then
+    # dcg-equivalent, but as a durable registry fact instead of a shell function.
+    # (`dcg` is a zsh function sourced from ~/.zshrc — it does not exist in the
+    # non-interactive shell tmux spawns, so fleet-ctl cannot just call it.)
+    # Auth goes to the LOCAL proxy, not Anthropic: the client key is read at spawn
+    # time inside the tmux shell, so it never lands in ps args or this log. The
+    # Anthropic oat is deliberately NOT injected — a gateway session must not
+    # carry Claude credentials (gateway/README.md rule 4).
+    local key="$B/.cli-proxy-api/client-key.txt"
+    [ -e "$key" ] || die "engine=gateway but no client key at $key — run gateway/install.sh first"
+    if ! curl -sf -m 2 -o /dev/null "http://127.0.0.1:${DCG_PORT:-8317}/v1/models" \
+         -H "x-api-key: $(cat "$key")" 2>/dev/null; then
+      die "engine=gateway but the proxy is not answering on 127.0.0.1:${DCG_PORT:-8317} — start cliproxyapi (systemctl --user start cliproxyapi)"
+    fi
+    relaunch='ANTHROPIC_BASE_URL=http://127.0.0.1:'"${DCG_PORT:-8317}"' ANTHROPIC_AUTH_TOKEN="$(cat '"$key"')" CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1 '"$relaunch"
+  elif [ -e "$oat" ]; then
+    relaunch='CLAUDE_CODE_OAUTH_TOKEN="$(cat '"$oat"')" '"$relaunch"
+  fi
+
+  log "start $name fresh=$fresh session=${session:-FRESH} engine=$engine model=${model:-default} oat=$([ "$engine" = gateway ] && echo n/a || { [ -e "$oat" ] && readlink -f "$oat" | xargs basename || echo none; })"
+  # Auth-account marker for the statusline (2026-07-15): a session can't introspect
+  # its own account — the token is injected via env and stripped after boot, and
+  # `claude auth status` returns loggedIn:false. fleet-ctl is the only thing that
+  # knows which account launched it, so record it here (HOME-relative) for the
+  # statusline to display. gateway = the local proxy, not a work/personal grant.
+  if [ "$engine" = "gateway" ]; then
+    printf 'gateway\n' > "$home/.claude/kushbot-auth-account" 2>/dev/null || true
+  else
+    printf '%s\n' "$(basename "$(readlink -f "$oat" 2>/dev/null || echo "$oat")" .txt | sed 's/^oat-//')" \
+      > "$home/.claude/kushbot-auth-account" 2>/dev/null || true
+  fi
+  tmux kill-session -t "$tmuxs" 2>/dev/null || true
+  sleep 1
+  reap_home_strays "$home"   # kill-by-HOME: catches twins under stale session names
+  # Dead-claim sweep. claimed_by.pid is the poller's mutual-exclusion primitive:
+  # a successor that finds a claim it does not own refuses to poll, so it comes up
+  # DEAF - listening to nobody, messages piling up at Telegram until the watchdog
+  # notices. A resume-restart is exactly the case that leaves one behind, because
+  # the old poller is killed rather than shut down through detach(). Everything for
+  # this home is dead by now (kill-session + reap, which waits), so a pid that
+  # fails kill -0 is stale by definition. A LIVE claim is never touched: that is a
+  # takeover, and it is the watchdog's call, not ours.
+  local claim claimpid
+  claim="$home/.claude/channels/telegram/claimed_by.pid"
+  if [ -f "$claim" ]; then
+    claimpid=$(cat "$claim" 2>/dev/null || true)
+    if [ -z "$claimpid" ] || ! kill -0 "$claimpid" 2>/dev/null; then
+      rm -f "$claim"
+      echo "  cleared dead claim: pid ${claimpid:-empty} not alive"
+      log "start $name: cleared dead claimed_by.pid (pid ${claimpid:-empty})"
+    fi
+  fi
+  tmux new-session -d -s "$tmuxs" -c "${cwd:-$home}" "$relaunch" || { echo "⚠️ $name: tmux new-session failed"; return 3; }
+  # onboarding prompts: PROMPT-AWARE dismissal (2026-07-14, replaces blind timed
+  # Enters). Blind Enters mistimed against a variable prompt sequence (trust
+  # dialog only shows for untrusted homes; resume-picker only for big sessions)
+  # could land during auth/init and corrupt login state — the Jul-12 instant-401
+  # restarts. Now: poll the pane, answer only the prompt actually showing, stop
+  # as soon as the input prompt is up. Never presses blind.
+  #
+  # Boot-window watchdog guard (2026-07-15, the kai2 --fresh incident): while this
+  # start is still booting (stuck at a prompt, MCP not yet polling) the watchdog can
+  # see the son as "MCP dead" and auto-heal it with a RESUME restart — which, for a
+  # --fresh start, resurrects the OLD session (capture_session picks the newest
+  # on-disk jsonl because the fresh one hasn't materialised yet). Hold the watchdog
+  # off for the boot+verify window via the maint flag it already honors. Cleared on
+  # verify-up success below; on FAILURE we deliberately leave it (expires in 180s),
+  # giving a stalled fresh boot a protected window instead of a resume-resurrection.
+  local maint="$STATE_DIR/maint-$name"
+  echo $(( $(date +%s) + 180 )) > "$maint"
+  local waited=0 pane paneflat
+  while [ $waited -lt 60 ]; do
+    sleep 3; waited=$((waited+3))
+    # Flatten wrapped lines: server's narrow pane wraps prompt text, so a line-based
+    # grep for a multi-word phrase silently misses it (this is exactly why the
+    # dev-channels prompt went undismissed and kai2 stalled). Match on the flattened
+    # text so wrapping can't hide a prompt.
+    pane=$(tmux capture-pane -t "$tmuxs" -p -S -40 2>/dev/null || true)
+    paneflat=$(echo "$pane" | tr '\n' ' ')
+    if echo "$paneflat" | grep -q "bypass permissions on"; then
+      break   # fully booted at the input prompt
+    elif echo "$paneflat" | grep -q "Is this a project you created"; then
+      # Trust dialog. Claude Code's default selection here is "No, exit", NOT
+      # trust, so the blind Enter this used to send EXITED claude and the start
+      # then failed verify-up (munshi and vaidya both died this way). Read the ❯
+      # cursor off the RAW pane, not paneflat: flattening destroys the line
+      # boundaries, so there the marker cannot be tied to an option at all.
+      # Answer wherever the cursor actually is; the option order is Claude's to
+      # change, and this survives it changing back.
+      if echo "$pane" | grep -F '❯' | grep -q 'No, exit'; then
+        tmux send-keys -t "$tmuxs" Down; sleep 1; tmux send-keys -t "$tmuxs" Enter
+      elif echo "$pane" | grep -F '❯' | grep -q 'Yes, I trust'; then
+        tmux send-keys -t "$tmuxs" Enter
+      fi
+      # Marker on neither option (mid-render): press NOTHING and re-poll in 3s.
+      # A guessed key here exits claude outright, so waiting is strictly cheaper
+      # than being wrong.
+    elif echo "$paneflat" | grep -qE "Loading development channels|I am using this for local development|Please use --channels"; then
+      tmux send-keys -t "$tmuxs" Enter   # dev-channels confirm (default: option 1)
+    elif echo "$paneflat" | grep -q "Resume from summary"; then
+      tmux send-keys -t "$tmuxs" Enter   # resume-picker (default: 1 = summary)
+    fi
+  done
+
+  # verify-up: claude + bun + live claim, max 60s
+  local ok=0 i
+  for i in $(seq 1 12); do
+    sleep 5
+    local cp bp cpid
+    cp=$(claude_pid_for_home "$home"); bp=$(bun_pid_for_home "$home")
+    cpid=$(cat "$home/.claude/channels/telegram/claimed_by.pid" 2>/dev/null || true)
+    if [ -n "$cp" ] && [ -n "$bp" ] && [ -n "$cpid" ] && kill -0 "$cpid" 2>/dev/null; then ok=1; break; fi
+  done
+  if [ $ok -eq 0 ]; then
+    echo "⚠️ $name relaunched but did NOT verify up within 60s — check: tmux capture-pane -p -t $tmuxs"
+    log "start $name FAILED verify-up"
+    # Leave the maint flag in place: it expires on its own (180s) and protects a
+    # still-stalled boot from a watchdog resume-resurrection in the meantime.
+    return 2      # return (not exit) so --all / boot-restore survive one failure
+  fi
+  rm -f "$maint"  # verified up — release the watchdog guard so real crashes heal promptly
+  regset "$name" parked false
+  if [ -n "$brief" ]; then
+    sleep 4
+    inject "$tmuxs" "$brief"
+    regset "$name" lease "$(jq -n --arg b "$(echo "$brief" | cut -c1-60)" '$b')"
+  fi
+  set_bot_icon "$name" up     # verified up -> drop the 🔴
+  echo "✅ $name up (session ${session:-fresh}, tmux $tmuxs)${brief:+ — brief injected}"
+  log "start $name OK session=${session:-FRESH}"
+  # Resume-guarantee (2026-07-06 "restart deleted my session" incident): resume was
+  # intended (fresh=0) but no session was captured AND prior sessions exist on disk
+  # → we came up FRESH and lost context. Never let that pass silently, even from a
+  # detached self-restart / account-switch. (First-ever start has no jsonl → no ping.)
+  if [ $fresh -eq 0 ] && [ -z "$session" ] && ls "$home"/.claude/projects/*/*.jsonl >/dev/null 2>&1; then
+    log "start $name WARNING resume-intended but came up FRESH (no session captured despite prior sessions)"
+    local _tok
+    _tok=$(grep -oP '^TELEGRAM_BOT_TOKEN=\K.*' "$B/.claude/channels/telegram/.env" 2>/dev/null || true)
+    [ -n "$_tok" ] && curl -sS -m 10 "https://api.telegram.org/bot${_tok}/sendMessage" -d chat_id="${OWNER_CHAT_ID:?set OWNER_CHAT_ID}" \
+      --data-urlencode text="⚠️ $name restarted but came up on a FRESH session — no prior session was resumed, so its context is gone. If it had an open conversation, that's lost. Check ~/kai/logs/fleet-ctl.log." >/dev/null 2>&1 || true
+  fi
+}
+
+# reload = restart with resume (default), optionally switching account first and
+# suppressing the watchdog's red/green churn (the owner 2026-07-07). The clean
+# account-switch primitive: `reload --all --auth work --soft`.
+#   --auth <account>  swap the shared credential (account-toggle) BEFORE restart
+#                     so sons come up on the new account. File-swap model shares
+#                     one grant, so --auth is inherently fleet-wide.
+#   --soft            set state/maint-<name> (expiry epoch) the watchdog honors:
+#                     no DEAD alert, no auto-restart race, no 🟢 recovery ping.
+#   --fresh / -m      as in start (resume is still the default).
+reload_one() { # name soft fresh brief engine model once
+  local name="$1" soft="$2" fresh="$3" brief="$4" engine="${5:-}" model="${6:-}" once="${7:-0}"
+  need_agent "$name"
+  local maint="$STATE_DIR/maint-$name"
+  local son_home; son_home=$(jreg "$name" '.home')
+  local quiet="$son_home/.claude/channels/telegram/quiet-restart"
+  if [ "$soft" = "1" ]; then
+    echo $(( $(date +%s) + 150 )) > "$maint"   # watchdog skips $name until this epoch
+    # bot-side quiet marker: server.ts notifyLifecycle suppresses the
+    # "🔴 going dark" / "🟢 attached — listening" chat notices while it's valid
+    # (detach leaves it, attach consumes it). Without this, --soft v1 only
+    # muted the watchdog and the bots still spammed every chat (2026-07-07).
+    echo $(( $(date +%s) + 150 )) > "$quiet" 2>/dev/null || true
+    log "reload $name soft: maintenance + quiet markers set"
+  fi
+  local args=("$name"); [ "$fresh" = "1" ] && args+=(--fresh); [ -n "$brief" ] && args+=(-m "$brief")
+  [ -n "$engine" ] && args+=(--engine "$engine")
+  [ -n "$model" ]  && args+=(--model "$model")
+  [ "$once" = "1" ] && args+=(--once)
+  local rc=0
+  cmd_start "${args[@]}" || rc=$?
+  [ "$soft" = "1" ] && rm -f "$maint"          # clear either way; a real failure re-surfaces next watchdog cycle
+  [ "$soft" = "1" ] && [ $rc -ne 0 ] && rm -f "$quiet" 2>/dev/null   # failed start = no attach consumed it; don't silence a later real crash
+  return $rc
+}
+
+cmd_reload() {
+  local all=0 auth="" soft=0 fresh=0 brief="" target="" yes=0 engine="" model="" once=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --all|-a)   all=1 ;;
+      --yes|-y)   yes=1 ;;
+      --auth)     shift; auth="${1:-}" ;;
+      --soft)     soft=1 ;;
+      --fresh)    fresh=1 ;;
+      --engine)   shift; engine="${1:-}" ;;
+      --model)    shift; model="${1:-}" ;;
+      --once)     once=1 ;;
+      -m|--brief) shift; brief="${1:-}" ;;
+      *)          target="$1" ;;
+    esac
+    shift
+  done
+
+  # An engine/model switch is per-agent intent, not a fleet-wide knob — allowing
+  # it with --all would rewrite the brain of every son in one keystroke.
+  if [ $all -eq 1 ] && { [ -n "$engine" ] || [ -n "$model" ]; }; then
+    die "--engine/--model are per-agent; run them on one son, not with --all"
+  fi
+
+  # Fleet-wide reloads are operator-approved actions, not agent judgment calls
+  # (the owner 2026-07-07, after two unsanctioned sweeps). --yes asserts you have
+  # his explicit OK for THIS sweep. Single-son reloads stay unguarded.
+  if [ $all -eq 1 ] && [ $yes -ne 1 ]; then
+    die "reload --all is fleet-wide — get the owner's explicit OK, then rerun with --yes"
+  fi
+
+  # account switch first (once), if requested. Two models, oat preferred:
+  #   creds-store/oat-<acct>.txt exists → repoint the oat-active symlink; every
+  #   (re)start injects CLAUDE_CODE_OAUTH_TOKEN from it (see cmd_start). The
+  #   legacy account-toggle file-swap still runs best-effort so /account and
+  #   the credentials-file fallback stay consistent — but the env var wins.
+  if [ -n "$auth" ]; then
+    local oatf="$B/.claude/creds-store/oat-$auth.txt"
+    if [ -f "$oatf" ]; then
+      ln -sfn "$oatf" "$B/.claude/creds-store/oat-active.txt"
+      echo "— oat-active -> $auth (setup-token; restarts launch with CLAUDE_CODE_OAUTH_TOKEN)"
+      "$B/kai/account-toggle.sh" "$auth" || echo "  (account-toggle warned — file-swap fallback may be stale; oat env var wins regardless)"
+    else
+      echo "— switching account -> $auth (no oat token stored; legacy file-swap only)"
+      "$B/kai/account-toggle.sh" "$auth" || die "account switch to '$auth' failed (see account-toggle.sh)"
+    fi
+  fi
+
+  local -a targets=()
+  if [ $all -eq 1 ]; then
+    local self_home="${HOME:-}"
+    while read -r name; do
+      [ -z "$name" ] && continue
+      [ "$name" = "kai" ] && { echo "  skip kai (parent — reload explicitly: fleet-ctl reload kai)"; continue; }
+      local home; home=$(jreg "$name" '.home')
+      if [ -n "$self_home" ] && [ "$home" = "$self_home" ]; then
+        echo "  skip $name (self — reload via ~/kai/self-restart.sh $name)"; continue
+      fi
+      targets+=("$name")
+    done < <(jq -r '.agents[] | select(.machine == "server" and .parked != true) | .name' "$REG")
+    [ ${#targets[@]} -eq 0 ] && { echo "no eligible sons to reload"; return 0; }
+    echo "— reloading ${#targets[@]}: ${targets[*]}$( [ $soft -eq 1 ] && echo ' (soft)' )$( [ -n "$auth" ] && echo " on $auth" )"
+  else
+    [ -n "$target" ] || die "reload <name> | --all [--auth <account>] [--soft] [--fresh] [-m brief]"
+    targets=("$target")
+  fi
+
+  local name fail=0
+  for name in "${targets[@]}"; do
+    reload_one "$name" "$soft" "$fresh" "$brief" "$engine" "$model" "$once" || { fail=$((fail+1)); echo "  ✗ $name reload failed"; }
+  done
+  [ $fail -gt 0 ] && return 2 || return 0
+}
+
+cmd_stop() {
+  need_agent "$1"
+  set_bot_icon "$1" down          # BEFORE the kill — a dead process can't rename itself
+  tmux kill-session -t "$(jreg "$1" '.tmux')" 2>/dev/null || true
+  regset "$1" parked true
+  echo "🛑 $1 stopped + parked (bot renamed 🔴; watchdog silent; unpark to resume)"
+  log "stop $1"
+}
+
+cmd_assign() {
+  need_agent "$1"
+  local tmuxs; tmuxs=$(jreg "$1" '.tmux')
+  tmux has-session -t "$tmuxs" 2>/dev/null || die "$1 is not running — use start"
+  inject "$tmuxs" "$2" || die "inject failed"
+  regset "$1" lease "$(jq -n --arg b "$(echo "$2" | cut -c1-60)" '$b')"
+  echo "📋 assigned to $1"
+  log "assign $1: $(echo "$2" | cut -c1-80)"
+}
+
+# rename <agent> "<display name>" — set the bot's Telegram display name (what
+# the owner sees in his chat list) via Bot API setMyName. No restart, no BotFather.
+# Max 64 chars. Telegram rate-limits name changes (~a few per day per bot).
+cmd_rename() {
+  need_agent "$1"
+  local home tok resp
+  home=$(jreg "$1" '.home')
+  [ -n "$home" ] && [ "$home" != "null" ] || die "$1 has no home in registry (remote agent?)"
+  tok=$(grep -oP '^TELEGRAM_BOT_TOKEN=\K.*' "$home/.claude/channels/telegram/.env" 2>/dev/null || true)
+  [ -n "$tok" ] || die "no bot token at $home/.claude/channels/telegram/.env"
+  [ ${#2} -le 64 ] || die "name too long (${#2} chars, Telegram max 64)"
+  resp=$(curl -sS -m 10 "https://api.telegram.org/bot${tok}/setMyName" --data-urlencode "name=$2")
+  echo "$resp" | jq -e '.ok == true' >/dev/null 2>&1 || die "setMyName failed: $resp"
+  echo "🏷️  $1 → \"$2\""
+  log "rename $1 → $2"
+}
+
+cmd_repair() {
+  local force="${1:-}"
+  echo "— stale claims:"
+  jq -r '.agents[] | select(.machine == "server") | .home' "$REG" | while read -r home; do
+    local f="$home/.claude/channels/telegram/claimed_by.pid" cpid
+    [ -f "$f" ] || continue
+    cpid=$(cat "$f" 2>/dev/null)
+    if [ -n "$cpid" ] && ! kill -0 "$cpid" 2>/dev/null; then
+      rm -f "$f" && echo "  cleared stale claim: $f (pid $cpid dead)"
+    fi
+  done
+  echo "— creds symlinks:"; bash "$B/kai/refresh-sons-creds.sh" && echo "  guard ran clean"
+  echo "— duplicate claude procs per home (twin sessions contending one bot slot):"
+  local dup_found=0
+  while IFS='|' read -r rname rhome rtmux; do
+    [ -z "$rname" ] && continue
+    local tl n
+    tl=$(toplevel_claudes_for_home "$rhome")
+    n=$(echo "$tl" | grep -c . || true)
+    if [ "${n:-0}" -gt 1 ]; then
+      dup_found=1
+      echo "  DUP $rname ($rhome): pids $(echo $tl | tr '\n' ' ')"
+      if [ "$force" = "--force" ]; then
+        reap_home_strays "$rhome" "$rtmux"
+      else
+        echo "      keeper = the one in tmux '$rtmux'; rerun with --force to reap strays"
+      fi
+    fi
+  done < <(jq -r '.agents[] | select(.machine == "server") | "\(.name)|\(.home)|\(.tmux)"' "$REG")
+  [ $dup_found -eq 0 ] && echo "  none"
+  echo "— orphan claude procs (no matching tmux session):"
+  local p h found=0
+  for p in $(pgrep -f 'dangerously-load-development-channels' 2>/dev/null); do
+    h=$(tr '\0' '\n' </proc/$p/environ 2>/dev/null | grep -oP '^HOME=\K.*' || true); h=${h:-$B}
+    local name tmuxs
+    name=$(jq -r --arg h "$h" '.agents[] | select(.home == $h) | .name' "$REG")
+    tmuxs=$(jq -r --arg h "$h" '.agents[] | select(.home == $h) | .tmux' "$REG")
+    if [ -n "$tmuxs" ] && ! tmux has-session -t "$tmuxs" 2>/dev/null; then
+      found=1
+      if [ "$force" = "--force" ]; then kill "$p" && echo "  KILLED orphan $p (${name:-?}, HOME=$h)"
+      else echo "  orphan: pid $p (${name:-?}, HOME=$h, started $(ps -o lstart= -p $p)) — rerun with --force to kill"; fi
+    fi
+  done
+  [ $found -eq 0 ] && echo "  none"
+  log "repair force=${force:-no}"
+}
+
+cmd_boot_restore() {
+  local started=""
+  jq -r '.agents[] | select(.machine == "server" and .parked != true and .spawn != null) | .name' "$REG" | while read -r name; do
+    tmux has-session -t "$(jreg "$name" '.tmux')" 2>/dev/null && continue
+    cmd_start "$name" >/dev/null 2>&1 && echo "$name" >> /tmp/.fleet-restore-started
+  done
+  started=$(cat /tmp/.fleet-restore-started 2>/dev/null | tr '\n' ' '; rm -f /tmp/.fleet-restore-started)
+  local token
+  token=$(grep -oP '^TELEGRAM_BOT_TOKEN=\K.*' "$B/.claude/channels/telegram/.env" 2>/dev/null || true)
+  if [ -n "$token" ]; then
+    curl -sS -m 10 "https://api.telegram.org/bot${token}/sendMessage" -d chat_id="${OWNER_CHAT_ID:?set OWNER_CHAT_ID}" \
+      --data-urlencode text="🟢 boot-restore: server came up; restored sessions (resumed): ${started:-none missing}. Parent kai needs manual start if down." >/dev/null 2>&1 || true
+  fi
+  log "boot-restore: ${started:-none}"
+}
+
+case "${1:-}" in
+  status)       shift; if [ "${1:-}" = "--json" ]; then cmd_status_json; else cmd_status; fi ;;
+  start)        shift; [ $# -ge 1 ] || die "start <name> [--fresh] [-m brief]"; cmd_start "$@" ;;
+  reload)       shift; cmd_reload "$@" ;;
+  stop)         shift; [ $# -eq 1 ] || die "stop <name>"; cmd_stop "$1" ;;
+  park)         shift; need_agent "$1"; regset "$1" parked true; echo "parked $1" ;;
+  unpark)       shift; need_agent "$1"; regset "$1" parked false; echo "unparked $1" ;;
+  assign)       shift; [ $# -eq 2 ] || die 'assign <name> "brief"'; cmd_assign "$1" "$2" ;;
+  lease)        shift; [ $# -eq 2 ] || die 'lease <name> "task"'; need_agent "$1"; regset "$1" lease "$(jq -n --arg b "$2" '$b')"; echo "lease set" ;;
+  repair)       shift; cmd_repair "${1:-}" ;;
+  rename)       shift; [ $# -eq 2 ] || die 'rename <name> "Display Name"'; cmd_rename "$1" "$2" ;;
+  boot-restore) cmd_boot_restore ;;
+  *) echo "usage: fleet-ctl status [--json] | start <name> [--fresh] [-m brief] | reload <name>|--all [--auth <account>] [--soft] [--fresh] [-m brief] | stop <name> | park/unpark <name> | assign <name> \"brief\" | lease <name> \"task\" | repair [--force] | rename <name> \"Display Name\" | boot-restore"; exit 1 ;;
+esac

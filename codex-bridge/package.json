@@ -1,0 +1,14 @@
+{
+  "name": "codex-bridge",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "description": "Bridge an OpenAI Codex app-server session to Telegram via the kushbot MCP server",
+  "scripts": {
+    "start": "bun bridge.ts",
+    "selftest": "bun bridge.ts --selftest"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0"
+  }
+}

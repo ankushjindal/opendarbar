@@ -1,0 +1,57 @@
+{
+  "version": 2,
+  "updated": "2026-11-03",
+  "note": "Fleet address book, A2A allowlist, AND fleet-ctl roster. spawn/cwd drive start; parked suppresses watchdog death alerts + boot-restore. controller=true marks agents allowed to run fleet-ctl self-initiated. parent kai has spawn=null — fleet-ctl restarts it by capturing its live cmdline.",
+  "autoRestart": false,
+  "acctNote": "MAC ONLY. acct = the Anthropic account label this agent runs on (a file name under ~/.config/claude-accounts/). Written by a dashboard or /account switch, read by macctl start: it injects CLAUDE_ACCT_LABEL + CLAUDE_CODE_OAUTH_TOKEN from that store, so a crash heal or a reboot brings the agent back on the SAME account instead of reverting it to the ambient login. null or absent = whatever the launcher happens to be authenticated as. The token is never stored here, only the label; the spawn line cats it inside the spawned shell.",
+  "quietMirrorsNote": "A2A pairs whose owner mirror ping is OFF by default. Each entry is '<from>><to>'; '*' matches any agent. Read by the SENDER at send time and stamped into the envelope, so both ends agree. send_to_agent quiet:true/false overrides per message; priority:'high' always mirrors. Suppresses the Telegram ping ONLY — delivery, inbox, outbox.jsonl, receipts and the UNTRUSTED tag are unaffected.",
+  "quietMirrors": [],
+  "peers": {
+    "laptop": {
+      "ssh": "user@100.x.y.z",
+      "fleetRoot": "/Users/<user>/.claude/channels/fleet",
+      "note": "cross-machine A2A: fleet-relay scp's envelopes to peer:fleetRoot/<to>/inbox over tailscale; needs passwordless ssh key both ways"
+    }
+  },
+  "selfMachine": "server",
+  "agents": [
+    {
+      "name": "kai",
+      "machine": "server",
+      "home": "/home/owner",
+      "tmux": "kai",
+      "role": "Parent agent on the server: fleet supervisor. Restarted only by self-restart, never by fleet-ctl reload --all.",
+      "controller": true,
+      "spawn": null,
+      "cwd": "/home/owner",
+      "parked": false,
+      "lease": null,
+      "bot": "example_parent_bot"
+    },
+    {
+      "name": "kai1",
+      "machine": "server",
+      "home": "/home/owner/kai1-home",
+      "tmux": "kai1-son",
+      "role": "generalist worker (mirror of kai)",
+      "spawn": "HOME=/home/owner/kai1-home /home/owner/.local/bin/claude --dangerously-load-development-channels server:kushbot --dangerously-skip-permissions --agent kai-son",
+      "cwd": "/home/owner",
+      "parked": false,
+      "lease": null,
+      "bot": "example_son1_bot"
+    },
+    {
+      "name": "guru",
+      "machine": "server",
+      "home": "/home/owner/guru-home",
+      "tmux": "guru",
+      "role": "learning agent (example standing persona)",
+      "spawn": "HOME=/home/owner/guru-home /home/owner/.local/bin/claude --dangerously-load-development-channels server:kushbot --dangerously-skip-permissions --agent guru",
+      "cwd": "/home/owner/learn",
+      "parked": true,
+      "lease": null,
+      "bot": "example_guru_bot",
+      "acct": null
+    }
+  ]
+}

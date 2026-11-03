@@ -1,0 +1,11 @@
+[Unit]
+Description=Darbar Reading podcast feed files (behind Tailscale Funnel /pod-<token>)
+After=network-online.target
+
+[Service]
+ExecStart=/home/owner/.bun/bin/bun /home/owner/kai/KushDarbar/fleet/podcast/serve.ts
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=default.target
